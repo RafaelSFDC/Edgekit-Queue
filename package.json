@@ -1,0 +1,37 @@
+{
+  "name": "cloudflare-stash",
+  "version": "1.0.0",
+  "description": "Self-hosted, noob-friendly Upstash (QStash & Redis) clone on Cloudflare Workers using Hono and SQLite Durable Objects",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "upstash",
+    "qstash",
+    "redis",
+    "cloudflare",
+    "cloudflare-workers",
+    "hono",
+    "durable-objects",
+    "queue",
+    "serverless"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "hono": "^4.7.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261029.1",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7",
+    "wrangler": "^4.155.0"
+  }
+}

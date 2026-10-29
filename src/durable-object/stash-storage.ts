@@ -1,0 +1,858 @@
+import { DurableObject } from 'cloudflare:workers';
+import type {
+  Env,
+  QueueMessage,
+  DLQMessage,
+  PublishOptions,
+  PublishResult,
+  QueueStats,
+} from '../types.js';
+import { MESSAGE_STATUS } from '../types.js';
+import { parseDelay } from '../utils/delay.js';
+
+export class StashStorage extends DurableObject {
+  private envConfig: Env;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this.envConfig = env;
+
+    ctx.blockConcurrencyWhile(async () => {
+      await this.initDatabase();
+    });
+  }
+
+  /**
+   * Initialize SQLite tables for Queue, Dead Letter Queue (DLQ), and Redis/KV Store
+   */
+  private async initDatabase(): Promise<void> {
+    await this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS queue (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        url TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        headers TEXT NOT NULL,
+        method TEXT DEFAULT 'POST',
+        created_at INTEGER NOT NULL,
+        visibility_at INTEGER DEFAULT 0,
+        status INTEGER DEFAULT 0,
+        retries INTEGER DEFAULT 0,
+        max_retries INTEGER DEFAULT 3,
+        last_error TEXT,
+        callback_url TEXT,
+        dedup_id TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_queue_visibility ON queue(status, visibility_at);
+      CREATE INDEX IF NOT EXISTS idx_queue_dedup ON queue(dedup_id);
+
+      CREATE TABLE IF NOT EXISTS queue_dlq (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        url TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        headers TEXT NOT NULL,
+        method TEXT DEFAULT 'POST',
+        failed_at INTEGER NOT NULL,
+        retries INTEGER NOT NULL,
+        error_reason TEXT NOT NULL,
+        callback_url TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_dlq_group ON queue_dlq(group_id);
+
+      CREATE TABLE IF NOT EXISTS kv_store (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        type TEXT NOT NULL DEFAULT 'string',
+        expires_at INTEGER,
+        updated_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_kv_expires ON kv_store(expires_at);
+    `);
+  }
+
+  // =========================================================================
+  // QUEUE & QSTASH METHODS
+  // =========================================================================
+
+  /**
+   * Publish a message to the queue
+   */
+  async publishMessage(options: PublishOptions): Promise<PublishResult> {
+    const now = Date.now();
+    const messageId = crypto.randomUUID();
+    const groupId = options.groupId || 'default';
+    const method = (options.method || 'POST').toUpperCase();
+    const defaultMaxRetries = Number(this.envConfig.TOTAL_RETRIES_BEFORE_DLQ) || 3;
+    const maxRetries = options.retries !== undefined ? options.retries : defaultMaxRetries;
+
+    const delayParsed = parseDelay(options.delay);
+    if (!delayParsed.success) {
+      throw new Error(delayParsed.error || 'Invalid delay parameter');
+    }
+
+    const visibilityAt = delayParsed.visibilityAt;
+
+    // Deduplication check
+    if (options.dedupId) {
+      const existing = await this.ctx.storage.sql.exec(
+        `SELECT id, visibility_at FROM queue WHERE dedup_id = ? LIMIT 1`,
+        options.dedupId
+      );
+      const rows = existing.toArray();
+      if (rows.length > 0) {
+        return {
+          messageId: String(rows[0].id),
+          groupId,
+          url: options.url,
+          visibilityAt: Number(rows[0].visibility_at),
+          delayMs: Math.max(0, Number(rows[0].visibility_at) - now),
+          deduplicated: true,
+        };
+      }
+    }
+
+    const payloadStr =
+      typeof options.payload === 'string'
+        ? options.payload
+        : JSON.stringify(options.payload ?? {});
+
+    const headersStr = JSON.stringify(options.headers ?? {});
+
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO queue (
+        id, group_id, url, payload, headers, method, created_at,
+        visibility_at, status, retries, max_retries, callback_url, dedup_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      messageId,
+      groupId,
+      options.url,
+      payloadStr,
+      headersStr,
+      method,
+      now,
+      visibilityAt,
+      MESSAGE_STATUS.PENDING,
+      0,
+      maxRetries,
+      options.callbackUrl || null,
+      options.dedupId || null
+    );
+
+    // Schedule DO alarm or trigger immediate delivery
+    if (visibilityAt > now) {
+      await this.scheduleEarliestAlarm(visibilityAt);
+    } else {
+      // Immediate delivery: trigger in background without blocking response
+      this.ctx.waitUntil(this.consumeQueue());
+    }
+
+    return {
+      messageId,
+      groupId,
+      url: options.url,
+      visibilityAt,
+      delayMs: delayParsed.delayMs,
+      deduplicated: false,
+    };
+  }
+
+  /**
+   * Consume and dispatch due messages
+   */
+  async consumeQueue(batchSizeLimit?: number): Promise<{ processed: number; succeeded: number; failed: number }> {
+    const now = Date.now();
+    const maxLimit = batchSizeLimit || Number(this.envConfig.MAX_CONCURRENT_DELIVERIES) || 10;
+
+    // Atomically select and lock pending messages that are ready for delivery
+    const result = await this.ctx.storage.sql.exec(
+      `UPDATE queue
+       SET status = ?
+       WHERE id IN (
+         SELECT id FROM queue
+         WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?)
+         ORDER BY created_at ASC
+         LIMIT ?
+       )
+       RETURNING id, group_id, url, payload, headers, method, created_at,
+                 visibility_at, status, retries, max_retries, last_error, callback_url, dedup_id`,
+      MESSAGE_STATUS.PROCESSING,
+      MESSAGE_STATUS.PENDING,
+      now,
+      maxLimit
+    );
+
+    const messages = result.toArray() as unknown as QueueMessage[];
+    if (messages.length === 0) {
+      await this.scheduleNextPendingAlarm();
+      return { processed: 0, succeeded: 0, failed: 0 };
+    }
+
+    let succeeded = 0;
+    let failed = 0;
+
+    const deliveryPromises = messages.map(async (msg) => {
+      const outcome = await this.deliverMessage(msg);
+      if (outcome) succeeded++;
+      else failed++;
+    });
+
+    await Promise.allSettled(deliveryPromises);
+
+    // Check if there are more pending messages due now or in the future
+    await this.scheduleNextPendingAlarm();
+
+    return { processed: messages.length, succeeded, failed };
+  }
+
+  /**
+   * Deliver an individual HTTP message with timeout and error handling
+   */
+  private async deliverMessage(msg: QueueMessage): Promise<boolean> {
+    const timeoutSeconds = Number(this.envConfig.HTTP_REQUEST_TIMEOUT) || 15;
+    let customHeaders: Record<string, string> = {};
+    try {
+      customHeaders = JSON.parse(msg.headers || '{}');
+    } catch {}
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'Cloudflare-Stash/1.0',
+      'Upstash-Message-Id': msg.id,
+      'Upstash-Group-Id': msg.group_id,
+      'Upstash-Retries': String(msg.retries),
+      ...customHeaders,
+    };
+
+    let success = false;
+    let errorDetail = '';
+
+    try {
+      const response = await fetch(msg.url, {
+        method: msg.method || 'POST',
+        headers,
+        body: ['GET', 'HEAD'].includes(msg.method) ? undefined : msg.payload,
+        signal: AbortSignal.timeout(timeoutSeconds * 1000),
+      });
+
+      if (response.ok) {
+        success = true;
+      } else {
+        errorDetail = `HTTP ${response.status}: ${response.statusText}`;
+      }
+    } catch (err: any) {
+      errorDetail = err?.message || 'Network / Timeout Error';
+    }
+
+    if (success) {
+      // Succeeded: remove from queue
+      await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE id = ?`, msg.id);
+
+      // Trigger callback if defined
+      if (msg.callback_url) {
+        this.ctx.waitUntil(this.sendCallback(msg.callback_url, {
+          status: 'success',
+          messageId: msg.id,
+          groupId: msg.group_id,
+          url: msg.url,
+          retries: msg.retries,
+        }));
+      }
+      return true;
+    } else {
+      // Failed: retry or move to DLQ
+      const nextRetries = msg.retries + 1;
+
+      if (nextRetries >= msg.max_retries) {
+        // Move to DLQ
+        await this.ctx.storage.sql.exec(
+          `INSERT INTO queue_dlq (
+            id, group_id, url, payload, headers, method, failed_at, retries, error_reason, callback_url
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          msg.id,
+          msg.group_id,
+          msg.url,
+          msg.payload,
+          msg.headers,
+          msg.method,
+          Date.now(),
+          nextRetries,
+          errorDetail,
+          msg.callback_url
+        );
+
+        await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE id = ?`, msg.id);
+
+        if (msg.callback_url) {
+          this.ctx.waitUntil(this.sendCallback(msg.callback_url, {
+            status: 'failed',
+            dlq: true,
+            messageId: msg.id,
+            groupId: msg.group_id,
+            url: msg.url,
+            retries: nextRetries,
+            error: errorDetail,
+          }));
+        }
+      } else {
+        // Exponential backoff: 2s, 4s, 8s, 16s... up to 60s
+        const backoffMs = Math.min(60_000, 1000 * Math.pow(2, nextRetries));
+        const nextVisibility = Date.now() + backoffMs;
+
+        await this.ctx.storage.sql.exec(
+          `UPDATE queue
+           SET status = ?, retries = ?, visibility_at = ?, last_error = ?
+           WHERE id = ?`,
+          MESSAGE_STATUS.PENDING,
+          nextRetries,
+          nextVisibility,
+          errorDetail,
+          msg.id
+        );
+
+        await this.scheduleEarliestAlarm(nextVisibility);
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Send notification to callback URL
+   */
+  private async sendCallback(callbackUrl: string, body: Record<string, any>): Promise<void> {
+    try {
+      await fetch(callbackUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Cloudflare-Stash-Callback/1.0',
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (e) {
+      console.warn('Failed to dispatch callback to', callbackUrl, e);
+    }
+  }
+
+  /**
+   * Durable Object Alarm handler - automatically wakes up to process scheduled messages
+   */
+  async alarm(): Promise<void> {
+    await this.cleanupExpiredKV();
+    await this.consumeQueue();
+  }
+
+  /**
+   * Schedule DO alarm for the earliest scheduled message
+   */
+  private async scheduleEarliestAlarm(targetTime: number): Promise<void> {
+    const currentAlarm = await this.ctx.storage.getAlarm();
+    if (!currentAlarm || targetTime < currentAlarm) {
+      await this.ctx.storage.setAlarm(targetTime);
+    }
+  }
+
+  /**
+   * Inspect queue for the next scheduled message and set alarm accordingly
+   */
+  private async scheduleNextPendingAlarm(): Promise<void> {
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT MIN(visibility_at) as next_run
+       FROM queue
+       WHERE status = ? AND visibility_at > ?`,
+      MESSAGE_STATUS.PENDING,
+      Date.now()
+    );
+
+    const row = result.toArray()[0];
+    if (row && row.next_run && Number(row.next_run) > Date.now()) {
+      await this.ctx.storage.setAlarm(Number(row.next_run));
+    }
+  }
+
+  /**
+   * Query queue stats
+   */
+  async getStats(groupId?: string): Promise<QueueStats> {
+    const now = Date.now();
+    const group = groupId || 'default';
+
+    const pendingQuery = await this.ctx.storage.sql.exec(
+      `SELECT count(id) as count FROM queue WHERE group_id = ? AND status = ? AND (visibility_at = 0 OR visibility_at <= ?)`,
+      group,
+      MESSAGE_STATUS.PENDING,
+      now
+    );
+
+    const delayedQuery = await this.ctx.storage.sql.exec(
+      `SELECT count(id) as count FROM queue WHERE group_id = ? AND status = ? AND visibility_at > ?`,
+      group,
+      MESSAGE_STATUS.PENDING,
+      now
+    );
+
+    const processingQuery = await this.ctx.storage.sql.exec(
+      `SELECT count(id) as count FROM queue WHERE group_id = ? AND status = ?`,
+      group,
+      MESSAGE_STATUS.PROCESSING
+    );
+
+    const dlqQuery = await this.ctx.storage.sql.exec(
+      `SELECT count(id) as count FROM queue_dlq WHERE group_id = ?`,
+      group
+    );
+
+    const kvCountQuery = await this.ctx.storage.sql.exec(
+      `SELECT count(key) as count FROM kv_store WHERE expires_at IS NULL OR expires_at > ?`,
+      now
+    );
+
+    return {
+      group_id: group,
+      pending: Number(pendingQuery.toArray()[0]?.count) || 0,
+      delayed: Number(delayedQuery.toArray()[0]?.count) || 0,
+      processing: Number(processingQuery.toArray()[0]?.count) || 0,
+      dlq: Number(dlqQuery.toArray()[0]?.count) || 0,
+      kvKeysCount: Number(kvCountQuery.toArray()[0]?.count) || 0,
+    };
+  }
+
+  /**
+   * Retrieve messages with pagination for dashboard
+   */
+  async getMessages(groupId: string, limit: number = 20, offset: number = 0): Promise<QueueMessage[]> {
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT id, group_id, url, payload, headers, method, created_at,
+              visibility_at, status, retries, max_retries, last_error, callback_url, dedup_id
+       FROM queue
+       WHERE group_id = ?
+       ORDER BY created_at DESC
+       LIMIT ? OFFSET ?`,
+      groupId,
+      limit,
+      offset
+    );
+
+    return result.toArray() as unknown as QueueMessage[];
+  }
+
+  /**
+   * Retrieve DLQ messages with pagination
+   */
+  async getDLQMessages(groupId: string, limit: number = 20, offset: number = 0): Promise<DLQMessage[]> {
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT id, group_id, url, payload, headers, method, failed_at, retries, error_reason, callback_url
+       FROM queue_dlq
+       WHERE group_id = ?
+       ORDER BY failed_at DESC
+       LIMIT ? OFFSET ?`,
+      groupId,
+      limit,
+      offset
+    );
+
+    return result.toArray() as unknown as DLQMessage[];
+  }
+
+  /**
+   * Retry a DLQ message by moving it back to the active queue
+   */
+  async retryDLQMessage(id: string): Promise<boolean> {
+    const check = await this.ctx.storage.sql.exec(
+      `SELECT id, group_id, url, payload, headers, method, callback_url FROM queue_dlq WHERE id = ?`,
+      id
+    );
+    const row = check.toArray()[0];
+    if (!row) return false;
+
+    const defaultMaxRetries = Number(this.envConfig.TOTAL_RETRIES_BEFORE_DLQ) || 3;
+
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO queue (
+        id, group_id, url, payload, headers, method, created_at,
+        visibility_at, status, retries, max_retries, callback_url
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      row.id,
+      row.group_id,
+      row.url,
+      row.payload,
+      row.headers,
+      row.method || 'POST',
+      Date.now(),
+      0,
+      MESSAGE_STATUS.PENDING,
+      0,
+      defaultMaxRetries,
+      row.callback_url
+    );
+
+    await this.ctx.storage.sql.exec(`DELETE FROM queue_dlq WHERE id = ?`, id);
+
+    this.ctx.waitUntil(this.consumeQueue());
+    return true;
+  }
+
+  /**
+   * Delete an active message by ID
+   */
+  async deleteMessage(id: string): Promise<boolean> {
+    const res = await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE id = ?`, id);
+    return true;
+  }
+
+  /**
+   * Delete a DLQ message by ID
+   */
+  async deleteDLQMessage(id: string): Promise<boolean> {
+    await this.ctx.storage.sql.exec(`DELETE FROM queue_dlq WHERE id = ?`, id);
+    return true;
+  }
+
+  /**
+   * Purge active queue or DLQ
+   */
+  async purgeQueue(groupId: string, target: 'active' | 'dlq' | 'all' = 'active'): Promise<void> {
+    if (target === 'active' || target === 'all') {
+      await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE group_id = ?`, groupId);
+    }
+    if (target === 'dlq' || target === 'all') {
+      await this.ctx.storage.sql.exec(`DELETE FROM queue_dlq WHERE group_id = ?`, groupId);
+    }
+  }
+
+  // =========================================================================
+  // REDIS / KV COMPATIBILITY METHODS
+  // =========================================================================
+
+  private async cleanupExpiredKV(): Promise<void> {
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+      Date.now()
+    );
+  }
+
+  /**
+   * Redis GET
+   */
+  async kvGet(key: string): Promise<string | null> {
+    const now = Date.now();
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT value, expires_at FROM kv_store WHERE key = ? LIMIT 1`,
+      key
+    );
+    const row = result.toArray()[0];
+    if (!row) return null;
+
+    if (row.expires_at !== null && Number(row.expires_at) <= now) {
+      await this.ctx.storage.sql.exec(`DELETE FROM kv_store WHERE key = ?`, key);
+      return null;
+    }
+
+    return String(row.value);
+  }
+
+  /**
+   * Redis SET with EX, PX, NX, XX support
+   */
+  async kvSet(
+    key: string,
+    value: string,
+    options?: { ex?: number; px?: number; nx?: boolean; xx?: boolean }
+  ): Promise<'OK' | null> {
+    const now = Date.now();
+    let expiresAt: number | null = null;
+
+    if (options?.ex) {
+      expiresAt = now + options.ex * 1000;
+    } else if (options?.px) {
+      expiresAt = now + options.px;
+    }
+
+    const existing = await this.kvGet(key);
+
+    if (options?.nx && existing !== null) {
+      return null; // NX requires key to NOT exist
+    }
+    if (options?.xx && existing === null) {
+      return null; // XX requires key to already exist
+    }
+
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO kv_store (key, value, type, expires_at, updated_at)
+       VALUES (?, ?, 'string', ?, ?)
+       ON CONFLICT(key) DO UPDATE SET
+         value = excluded.value,
+         expires_at = excluded.expires_at,
+         updated_at = excluded.updated_at`,
+      key,
+      value,
+      expiresAt,
+      now
+    );
+
+    return 'OK';
+  }
+
+  /**
+   * Redis DEL
+   */
+  async kvDel(...keys: string[]): Promise<number> {
+    if (keys.length === 0) return 0;
+    const placeholders = keys.map(() => '?').join(',');
+    const check = await this.ctx.storage.sql.exec(
+      `SELECT count(key) as count FROM kv_store WHERE key IN (${placeholders})`,
+      ...keys
+    );
+    const count = Number(check.toArray()[0]?.count) || 0;
+
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM kv_store WHERE key IN (${placeholders})`,
+      ...keys
+    );
+    return count;
+  }
+
+  /**
+   * Redis INCRBY / INCR
+   */
+  async kvIncrBy(key: string, increment: number = 1): Promise<number> {
+    const current = await this.kvGet(key);
+    let val = 0;
+    if (current !== null) {
+      val = parseInt(current, 10);
+      if (isNaN(val)) {
+        throw new Error('ERR value is not an integer or out of range');
+      }
+    }
+    const newVal = val + increment;
+    await this.kvSet(key, String(newVal));
+    return newVal;
+  }
+
+  /**
+   * Redis EXISTS
+   */
+  async kvExists(...keys: string[]): Promise<number> {
+    let count = 0;
+    for (const k of keys) {
+      if ((await this.kvGet(k)) !== null) count++;
+    }
+    return count;
+  }
+
+  /**
+   * Redis EXPIRE
+   */
+  async kvExpire(key: string, seconds: number): Promise<number> {
+    const current = await this.kvGet(key);
+    if (current === null) return 0;
+
+    const expiresAt = Date.now() + seconds * 1000;
+    await this.ctx.storage.sql.exec(
+      `UPDATE kv_store SET expires_at = ? WHERE key = ?`,
+      expiresAt,
+      key
+    );
+    return 1;
+  }
+
+  /**
+   * Redis TTL
+   */
+  async kvTtl(key: string): Promise<number> {
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT expires_at FROM kv_store WHERE key = ? LIMIT 1`,
+      key
+    );
+    const row = result.toArray()[0];
+    if (!row) return -2; // Key does not exist
+
+    if (row.expires_at === null) return -1; // No expiry
+
+    const remainingSec = Math.ceil((Number(row.expires_at) - Date.now()) / 1000);
+    if (remainingSec <= 0) {
+      await this.ctx.storage.sql.exec(`DELETE FROM kv_store WHERE key = ?`, key);
+      return -2;
+    }
+    return remainingSec;
+  }
+
+  /**
+   * Redis KEYS pattern
+   */
+  async kvKeys(pattern: string = '*'): Promise<string[]> {
+    await this.cleanupExpiredKV();
+    let sqlPattern = pattern.replace(/\*/g, '%').replace(/\?/g, '_');
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT key FROM kv_store WHERE key LIKE ? ORDER BY key ASC LIMIT 500`,
+      sqlPattern
+    );
+    return result.toArray().map((r) => String(r.key));
+  }
+
+  /**
+   * Redis FLUSHDB
+   */
+  async kvFlushDb(): Promise<'OK'> {
+    await this.ctx.storage.sql.exec(`DELETE FROM kv_store`);
+    return 'OK';
+  }
+
+  /**
+   * List all KV entries with details (for Dashboard)
+   */
+  async kvListEntries(limit: number = 50, offset: number = 0): Promise<Array<{
+    key: string;
+    value: string;
+    type: string;
+    ttl: number;
+    updatedAt: number;
+  }>> {
+    await this.cleanupExpiredKV();
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT key, value, type, expires_at, updated_at FROM kv_store ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+      limit,
+      offset
+    );
+
+    const now = Date.now();
+    return result.toArray().map((r) => {
+      let ttl = -1;
+      if (r.expires_at !== null) {
+        ttl = Math.max(0, Math.ceil((Number(r.expires_at) - now) / 1000));
+      }
+      return {
+        key: String(r.key),
+        value: String(r.value),
+        type: String(r.type || 'string'),
+        ttl,
+        updatedAt: Number(r.updated_at),
+      };
+    });
+  }
+
+  /**
+   * Generic Command Runner for Upstash Redis compatibility:
+   * Supports ["SET", "k", "v"], ["GET", "k"], ["INCR", "k"], etc.
+   */
+  async executeRedisCommand(cmd: string, args: any[]): Promise<any> {
+    const command = cmd.toUpperCase();
+
+    switch (command) {
+      case 'PING':
+        return args[0] || 'PONG';
+
+      case 'GET': {
+        const [key] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "get" command');
+        return await this.kvGet(String(key));
+      }
+
+      case 'SET': {
+        const [key, value, ...extra] = args;
+        if (!key || value === undefined) throw new Error('ERR wrong number of arguments for "set" command');
+
+        const opts: { ex?: number; px?: number; nx?: boolean; xx?: boolean } = {};
+        for (let i = 0; i < extra.length; i++) {
+          const opt = String(extra[i]).toUpperCase();
+          if (opt === 'EX' && extra[i + 1]) {
+            opts.ex = parseInt(extra[++i], 10);
+          } else if (opt === 'PX' && extra[i + 1]) {
+            opts.px = parseInt(extra[++i], 10);
+          } else if (opt === 'NX') {
+            opts.nx = true;
+          } else if (opt === 'XX') {
+            opts.xx = true;
+          }
+        }
+        return await this.kvSet(String(key), String(value), opts);
+      }
+
+      case 'MGET': {
+        if (args.length === 0) return [];
+        const results = [];
+        for (const k of args) {
+          results.push(await this.kvGet(String(k)));
+        }
+        return results;
+      }
+
+      case 'MSET': {
+        if (args.length < 2 || args.length % 2 !== 0) {
+          throw new Error('ERR wrong number of arguments for "mset" command');
+        }
+        for (let i = 0; i < args.length; i += 2) {
+          await this.kvSet(String(args[i]), String(args[i + 1]));
+        }
+        return 'OK';
+      }
+
+      case 'DEL': {
+        if (args.length === 0) return 0;
+        return await this.kvDel(...args.map(String));
+      }
+
+      case 'EXISTS': {
+        if (args.length === 0) return 0;
+        return await this.kvExists(...args.map(String));
+      }
+
+      case 'INCR': {
+        const [key] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "incr" command');
+        return await this.kvIncrBy(String(key), 1);
+      }
+
+      case 'INCRBY': {
+        const [key, increment] = args;
+        if (!key || increment === undefined) throw new Error('ERR wrong number of arguments for "incrby" command');
+        return await this.kvIncrBy(String(key), parseInt(increment, 10));
+      }
+
+      case 'DECR': {
+        const [key] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "decr" command');
+        return await this.kvIncrBy(String(key), -1);
+      }
+
+      case 'DECRBY': {
+        const [key, decrement] = args;
+        if (!key || decrement === undefined) throw new Error('ERR wrong number of arguments for "decrby" command');
+        return await this.kvIncrBy(String(key), -parseInt(decrement, 10));
+      }
+
+      case 'EXPIRE': {
+        const [key, seconds] = args;
+        if (!key || seconds === undefined) throw new Error('ERR wrong number of arguments for "expire" command');
+        return await this.kvExpire(String(key), parseInt(seconds, 10));
+      }
+
+      case 'TTL': {
+        const [key] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "ttl" command');
+        return await this.kvTtl(String(key));
+      }
+
+      case 'KEYS': {
+        const [pattern] = args;
+        return await this.kvKeys(pattern ? String(pattern) : '*');
+      }
+
+      case 'FLUSHDB':
+      case 'FLUSHALL': {
+        return await this.kvFlushDb();
+      }
+
+      case 'INFO': {
+        return `# Server\ncloudflare_stash_version:1.0.0\nos:cloudflare-workers\nstorage:sqlite-durable-objects\n`;
+      }
+
+      default:
+        throw new Error(`ERR unknown command '${command}'`);
+    }
+  }
+}

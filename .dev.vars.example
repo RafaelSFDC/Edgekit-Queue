@@ -1,0 +1,7 @@
+# Cloudflare-Stash Local Configuration
+# Copy this file to .dev.vars for local testing
+
+API_KEY=stash_secret_key
+HTTP_REQUEST_TIMEOUT=15
+TOTAL_RETRIES_BEFORE_DLQ=3
+MAX_CONCURRENT_DELIVERIES=10

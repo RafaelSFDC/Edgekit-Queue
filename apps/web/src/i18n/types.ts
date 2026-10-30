@@ -1,0 +1,141 @@
+export type Locale = 'en' | 'pt-BR';
+
+export interface Translations {
+  common: {
+    copy: string;
+    copied: string;
+    cancel: string;
+    close: string;
+    clear: string;
+    loading: string;
+    error: string;
+    success: string;
+    status: string;
+    active: string;
+    all: string;
+    refresh: string;
+    delete: string;
+    retry: string;
+    purge: string;
+    save: string;
+    actions: string;
+    search: string;
+  };
+  navbar: {
+    brandSubtitle: string;
+    online: string;
+    degraded: string;
+    docs: string;
+    languageTooltip: string;
+    themeTooltip: string;
+    themeLight: string;
+    themeDark: string;
+    logout: string;
+    apiKey: string;
+  };
+  breadcrumbs: {
+    overview: string;
+    messages: string;
+    dlq: string;
+    redis: string;
+    snippets: string;
+  };
+  sidebar: {
+    home: string;
+    messages: string;
+    dlq: string;
+    redis: string;
+    snippets: string;
+    quickSearch: string;
+  };
+  overview: {
+    title: string;
+    subtitle: string;
+    pendingMessages: string;
+    delayedMessages: string;
+    processingMessages: string;
+    dlqCount: string;
+    kvCount: string;
+    triggerSweep: string;
+    triggerSweepDesc: string;
+    sweepRunning: string;
+    sweepSuccess: string;
+    quickPublish: string;
+    quickKv: string;
+    clusterStatus: string;
+  };
+  messages: {
+    title: string;
+    subtitle: string;
+    publishBtn: string;
+    purgeBtn: string;
+    filterAll: string;
+    filterScheduled: string;
+    filterProcessing: string;
+    searchPlaceholder: string;
+    tableId: string;
+    tableUrl: string;
+    tableStatus: string;
+    tableScheduled: string;
+    tableRetries: string;
+    tableCreatedAt: string;
+    noMessages: string;
+    noMessagesDesc: string;
+    inspectModalTitle: string;
+    deleteSuccess: string;
+    purgeConfirm: string;
+    purgeSuccess: string;
+  };
+  dlq: {
+    title: string;
+    subtitle: string;
+    purgeBtn: string;
+    tableId: string;
+    tableUrl: string;
+    tableFailedAt: string;
+    tableError: string;
+    tableRetries: string;
+    retrySuccess: string;
+    deleteSuccess: string;
+    purgeSuccess: string;
+    noDlq: string;
+    noDlqDesc: string;
+    purgeConfirm: string;
+  };
+  redis: {
+    title: string;
+    subtitle: string;
+    setKeyBtn: string;
+    flushBtn: string;
+    tableKey: string;
+    tableType: string;
+    tableTtl: string;
+    tableValue: string;
+    noKeys: string;
+    noKeysDesc: string;
+    searchPlaceholder: string;
+    deleteSuccess: string;
+    flushConfirm: string;
+    flushSuccess: string;
+  };
+  snippets: {
+    title: string;
+    subtitle: string;
+    qstashTab: string;
+    redisTab: string;
+    typescript: string;
+    python: string;
+    curl: string;
+    copyCode: string;
+  };
+  login: {
+    title: string;
+    subtitle: string;
+    apiKeyLabel: string;
+    apiKeyPlaceholder: string;
+    submit: string;
+    authenticating: string;
+    invalidKey: string;
+    defaultKeyHint: string;
+  };
+}

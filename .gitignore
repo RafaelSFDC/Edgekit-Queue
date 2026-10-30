@@ -1,29 +1,7 @@
-# Dependencies
 node_modules/
-.npm
-
-# Cloudflare Wrangler
 .wrangler/
 dist/
-worker-configuration.d.ts
-
-# Environment variables
+dist-web/
 .env
-.env.local
 .dev.vars
-
-# Operating system
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
-
-# Testing & Coverage
-coverage/
-.vitest/
-
-# Temp
-tmp/
 *.log

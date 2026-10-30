@@ -1,37 +1,37 @@
 {
-  "name": "cloudflare-stash",
+  "name": "edgekit-queue",
   "version": "1.0.0",
-  "description": "Self-hosted, noob-friendly Upstash (QStash & Redis) clone on Cloudflare Workers using Hono and SQLite Durable Objects",
-  "private": true,
   "type": "module",
+  "private": true,
+  "description": "Serverless, open-source Upstash QStash & Redis clone running on Cloudflare Workers and SQLite Durable Objects — Edgekit Queue",
   "scripts": {
-    "dev": "wrangler dev",
-    "start": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "tail": "wrangler tail",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "dev": "concurrently -n \"api,web\" -c \"magenta,cyan\" \"pnpm --filter @edgekit/api dev\" \"pnpm --filter @edgekit/web dev\"",
+    "dev:api": "pnpm --filter @edgekit/api dev",
+    "dev:web": "pnpm --filter @edgekit/web dev",
+    "setup": "node scripts/setup.mjs",
+    "build:web": "pnpm --filter @edgekit/web build",
+    "build:api": "pnpm --filter @edgekit/api build",
+    "build": "pnpm --filter @edgekit/web build && pnpm --filter @edgekit/api build",
+    "deploy": "pnpm --filter @edgekit/web build && pnpm --filter @edgekit/api deploy",
+    "cf-typegen": "pnpm --filter @edgekit/api cf-typegen",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "test:api": "pnpm --filter @edgekit/api test",
+    "test:web": "pnpm --filter @edgekit/web test"
   },
   "keywords": [
-    "upstash",
+    "queue",
     "qstash",
     "redis",
     "cloudflare",
-    "cloudflare-workers",
-    "hono",
+    "workers",
     "durable-objects",
-    "queue",
-    "serverless"
+    "serverless",
+    "edgekit"
   ],
   "author": "",
   "license": "MIT",
-  "dependencies": {
-    "hono": "^4.7.4"
-  },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20261029.1",
-    "typescript": "^5.7.3",
-    "vitest": "^3.0.7",
-    "wrangler": "^4.155.0"
+    "concurrently": "^9.1.2"
   }
 }

@@ -5,6 +5,7 @@ import { Button, buttonVariants } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useI18n } from '../i18n/context';
+import { useGroup } from '../context/group-context';
 import { useStatsQuery, useTriggerSweepMutation } from '../hooks/api/use-stats';
 import { useMessagesQuery } from '../hooks/api/use-messages';
 import { PublishMessageDialog } from '../components/queue/PublishMessageDialog';
@@ -28,9 +29,10 @@ import {
 
 export const OverviewPage: React.FC = () => {
   const { t } = useI18n();
-  const { data: stats, isLoading: statsLoading } = useStatsQuery();
-  const { data: messages = [], isLoading: messagesLoading } = useMessagesQuery();
-  const sweepMutation = useTriggerSweepMutation();
+  const { currentGroup } = useGroup();
+  const { data: stats, isLoading: statsLoading } = useStatsQuery(currentGroup);
+  const { data: messages = [], isLoading: messagesLoading } = useMessagesQuery(currentGroup);
+  const sweepMutation = useTriggerSweepMutation(currentGroup);
 
   const [publishOpen, setPublishOpen] = useState(false);
   const [setKeyOpen, setSetKeyOpen] = useState(false);

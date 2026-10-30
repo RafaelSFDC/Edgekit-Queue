@@ -14,6 +14,7 @@ import {
   TableCell,
 } from '@/components/ui/table';
 import { useI18n } from '../i18n/context';
+import { useGroup } from '../context/group-context';
 import {
   useMessagesQuery,
   useDeleteMessageMutation,
@@ -35,9 +36,10 @@ import {
 
 export const MessagesPage: React.FC = () => {
   const { t } = useI18n();
-  const { data: messages = [], isLoading, refetch } = useMessagesQuery();
-  const deleteMutation = useDeleteMessageMutation();
-  const purgeMutation = usePurgeMessagesMutation();
+  const { currentGroup } = useGroup();
+  const { data: messages = [], isLoading, refetch } = useMessagesQuery(currentGroup);
+  const deleteMutation = useDeleteMessageMutation(currentGroup);
+  const purgeMutation = usePurgeMessagesMutation(currentGroup);
 
   const [publishOpen, setPublishOpen] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState<QueueMessage | null>(null);

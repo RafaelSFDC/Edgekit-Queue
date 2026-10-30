@@ -13,6 +13,7 @@ import {
   TableCell,
 } from '@/components/ui/table';
 import { useI18n } from '../i18n/context';
+import { useGroup } from '../context/group-context';
 import {
   useDLQQuery,
   useRetryDLQMutation,
@@ -32,10 +33,11 @@ import {
 
 export const DlqPage: React.FC = () => {
   const { t } = useI18n();
-  const { data: dlqMessages = [], isLoading } = useDLQQuery();
-  const retryMutation = useRetryDLQMutation();
-  const deleteMutation = useDeleteDLQMutation();
-  const purgeMutation = usePurgeDLQMutation();
+  const { currentGroup } = useGroup();
+  const { data: dlqMessages = [], isLoading } = useDLQQuery(currentGroup);
+  const retryMutation = useRetryDLQMutation(currentGroup);
+  const deleteMutation = useDeleteDLQMutation(currentGroup);
+  const purgeMutation = usePurgeDLQMutation(currentGroup);
 
   const [selectedMessage, setSelectedMessage] = useState<DLQMessage | null>(null);
   const [search, setSearch] = useState('');

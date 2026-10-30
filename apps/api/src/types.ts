@@ -5,6 +5,8 @@ export interface Env {
   STASH_STORAGE: DurableObjectNamespace<StashStorage>;
   ASSETS?: Fetcher;
   API_KEY?: string;
+  QSTASH_CURRENT_SIGNING_KEY?: string;
+  QSTASH_NEXT_SIGNING_KEY?: string;
   HTTP_REQUEST_TIMEOUT?: number | string;
   TOTAL_RETRIES_BEFORE_DLQ?: number | string;
   MAX_CONCURRENT_DELIVERIES?: number | string;
@@ -46,6 +48,20 @@ export interface DLQMessage {
   error_reason: string;
 }
 
+export interface DeliveryLog {
+  id: string;
+  message_id: string;
+  group_id: string;
+  url: string;
+  method: string;
+  status_code: number | null;
+  success: number; // 1 for true, 0 for false in SQLite
+  latency_ms: number;
+  retries: number;
+  error: string | null;
+  delivered_at: number;
+}
+
 export interface PublishOptions {
   url: string;
   payload: any;
@@ -56,6 +72,7 @@ export interface PublishOptions {
   method?: string;
   callbackUrl?: string;
   dedupId?: string;
+  dedupWindowSeconds?: number;
 }
 
 export interface PublishResult {
@@ -74,4 +91,5 @@ export interface QueueStats {
   processing: number;
   dlq: number;
   kvKeysCount: number;
+  deliveryCount?: number;
 }

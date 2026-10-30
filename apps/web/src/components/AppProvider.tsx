@@ -5,6 +5,7 @@ import { queryClient } from '../lib/query-client';
 import { I18nProvider } from '../i18n/context';
 import { ThemeProvider } from '../theme/context';
 import { AuthProvider } from '../context/auth-context';
+import { GroupProvider } from '../context/group-context';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { Toaster } from './ui/sonner';
 
@@ -18,11 +19,13 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       <ThemeProvider>
         <I18nProvider>
           <AuthProvider>
-            <TooltipProvider delay={200}>
-              {children}
-              <Toaster position="bottom-right" richColors />
-              {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
-            </TooltipProvider>
+            <GroupProvider>
+              <TooltipProvider delay={200}>
+                {children}
+                <Toaster position="bottom-right" richColors />
+                {import.meta.env.DEV && <ReactQueryDevtools initialIsOpen={false} />}
+              </TooltipProvider>
+            </GroupProvider>
           </AuthProvider>
         </I18nProvider>
       </ThemeProvider>

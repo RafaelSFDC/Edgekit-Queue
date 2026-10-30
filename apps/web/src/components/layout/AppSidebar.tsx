@@ -3,6 +3,7 @@ import {
   Home,
   Layers,
   AlertOctagon,
+  Clock,
   Database,
   Code2,
   Search,
@@ -65,6 +66,13 @@ export const AppSidebar: React.FC = () => {
       icon: <AlertOctagon className="size-4 shrink-0" />,
       badge: dlqCount > 0 ? dlqCount : undefined,
       badgeVariant: (dlqCount > 0 ? 'destructive' : 'secondary') as 'destructive' | 'secondary',
+    },
+    {
+      to: '/logs',
+      label: (t.sidebar as any).logs || 'Delivery Logs',
+      icon: <Clock className="size-4 shrink-0" />,
+      badge: undefined,
+      badgeVariant: 'secondary' as const,
     },
     {
       to: '/redis',

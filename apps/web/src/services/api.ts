@@ -1,4 +1,4 @@
-import type { ClusterStats, QueueMessage, DLQMessage, RedisKVItem, PublishRequest } from '../types';
+import type { ClusterStats, QueueMessage, DLQMessage, RedisKVItem, PublishRequest, DeliveryLog } from '../types';
 
 export class ApiError extends Error {
   status: number;
@@ -265,6 +265,55 @@ export async function publishMessage(options: PublishRequest): Promise<{ message
   return res.json();
 }
 
+// 8.1 Groups
+export async function fetchGroups(): Promise<string[]> {
+  const res = await fetch(`${API_BASE}/api/v1/groups`, {
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    return ['default'];
+  }
+
+  const data = await res.json();
+  return data.groups || ['default'];
+}
+
+// 8.2 Delivery Logs
+export async function fetchDeliveryLogs(
+  groupId: string = 'default',
+  limit: number = 50,
+  offset: number = 0
+): Promise<DeliveryLog[]> {
+  const res = await fetch(
+    `${API_BASE}/logs?groupId=${encodeURIComponent(groupId)}&limit=${limit}&offset=${offset}`,
+    {
+      credentials: 'include',
+      headers: getAuthHeaders(),
+    }
+  );
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao listar logs de entrega.', res.status);
+  }
+
+  const data = await res.json();
+  return data.logs || [];
+}
+
+export async function clearDeliveryLogs(groupId: string = 'default'): Promise<void> {
+  const res = await fetch(`${API_BASE}/logs/clear?groupId=${encodeURIComponent(groupId)}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao limpar logs de entrega.', res.status);
+  }
+}
+
 // 9. Redis / KV Store
 export async function fetchRedisKeys(groupId: string = 'default'): Promise<RedisKVItem[]> {
   const res = await fetch(`${API_BASE}/kv/list?groupId=${encodeURIComponent(groupId)}`, {
@@ -277,7 +326,26 @@ export async function fetchRedisKeys(groupId: string = 'default'): Promise<Redis
   }
 
   const data = await res.json();
-  return data.keys || [];
+  return data.entries || data.keys || [];
+}
+
+export async function executeRedisRawCommand(
+  commandArgs: any[],
+  groupId: string = 'default'
+): Promise<any> {
+  const res = await fetch(`${API_BASE}/?groupId=${encodeURIComponent(groupId)}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(commandArgs),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new ApiError(data.error || 'Erro na execução do comando Redis.', res.status);
+  }
+
+  return data.result;
 }
 
 export async function setRedisKey(

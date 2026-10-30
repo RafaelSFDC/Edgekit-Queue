@@ -27,23 +27,32 @@ Edgekit Queue/
 
 1. **QStash (HTTP Queue & Background Tasks)**
    - Asynchronous dispatch to any webhook or HTTP endpoint.
+   - **Cryptographic Signature Verification (`Upstash-Signature`)**: Signs outgoing webhooks with HMAC-SHA256 (JWT) for full compatibility with official `@upstash/qstash` receiver SDKs.
    - **Flexible Scheduling & Delays**: `10s`, `30s`, `5m`, `2h`, `1d`, or UNIX timestamps.
    - **Exponential Backoff Retries**: Intelligently re-attempts failed downstream deliveries.
    - **Dead Letter Queue (DLQ)**: Captures messages that exhaust retries for inspection and 1-click retry.
-   - **Message Deduplication**: Avoid duplicate execution via `dedupId`.
+   - **Persistent Message Deduplication**: Prevents duplicate executions via persistent TTL table (`dedupId`).
+   - **Delivery Logs & Audit Trail**: Real-time auditing of delivery latency, HTTP status codes, and error reasons.
    - **Native DO Alarms**: Runs entirely on Cloudflare edge alarms without external cron providers.
 
 2. **Upstash Redis REST Clone**
-   - Redis commands over HTTP REST: `GET`, `SET`, `DEL`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `KEYS`, `FLUSHDB`.
+   - **Full Data Structure Support**:
+     - **Strings**: `GET`, `SET`, `DEL`, `INCR`, `DECR`, `EXPIRE`, `TTL`, `KEYS`, `FLUSHDB`, `MGET`, `MSET`.
+     - **Sorted Sets (ZSET)**: `ZADD`, `ZRANGE`, `ZRANGEBYSCORE`, `ZREMRANGEBYSCORE`, `ZREM`, `ZCARD`, `ZSCORE`, `ZINCRBY` — **fully unlocks `@upstash/ratelimit`**!
+     - **Hashes**: `HSET`, `HGET`, `HMGET`, `HGETALL`, `HDEL`, `HEXISTS`, `HLEN`, `HINCRBY`.
+     - **Lists**: `LPUSH`, `RPUSH`, `LPOP`, `RPOP`, `LLEN`, `LRANGE`.
    - **Direct compatibility with `@upstash/redis` SDK**: Use official client libraries in Node.js, Next.js, Bun, or Python.
    - Transactional pipeline support (`POST /pipeline`).
 
 3. **Interactive Web Dashboard (Modern SPA)**
    - Built with **React 19**, **Tailwind CSS v4**, **TanStack Router**, **TanStack Query**, and **Shadcn** UI primitives.
+   - Code-split routes with optimized bundle chunks (< 500 kB).
    - Official Edgekit Design System (Queue module identity: `#EC4899`).
+   - **Interactive Redis CLI Console**: Run arbitrary Redis commands with instant JSON output.
+   - **Queue Group Switcher**: Seamlessly switch between queue groups.
+   - **Delivery Logs Viewer**: Audit recent HTTP webhook dispatches.
    - Native bilingual support for **English (EN)** and **Portuguese (PT-BR)** with real-time toggle.
    - Dark and Light mode theme support.
-   - Active queue inspector, Dead Letter Queue diagnostics with retry/purge, Redis KV explorer, and interactive SDK snippet generator.
 
 ---
 

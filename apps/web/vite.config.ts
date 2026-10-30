@@ -9,6 +9,15 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-tanstack': ['@tanstack/react-router', '@tanstack/react-query'],
+          'vendor-icons': ['lucide-react'],
+        },
+      },
+    },
   },
   resolve: {
     alias: {
@@ -25,6 +34,7 @@ export default defineConfig({
       '/stats': 'http://127.0.0.1:8787',
       '/messages': 'http://127.0.0.1:8787',
       '/dlq': 'http://127.0.0.1:8787',
+      '/logs': 'http://127.0.0.1:8787',
       '/purge': 'http://127.0.0.1:8787',
       '/get': 'http://127.0.0.1:8787',
       '/set': 'http://127.0.0.1:8787',

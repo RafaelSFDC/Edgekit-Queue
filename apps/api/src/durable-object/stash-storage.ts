@@ -3,12 +3,14 @@ import type {
   Env,
   QueueMessage,
   DLQMessage,
+  DeliveryLog,
   PublishOptions,
   PublishResult,
   QueueStats,
 } from '../types.js';
 import { MESSAGE_STATUS } from '../types.js';
 import { parseDelay } from '../utils/delay.js';
+import { generateQStashSignature } from '../utils/signature.js';
 
 export class StashStorage extends DurableObject {
   private envConfig: Env;
@@ -23,7 +25,8 @@ export class StashStorage extends DurableObject {
   }
 
   /**
-   * Initialize SQLite tables for Queue, Dead Letter Queue (DLQ), and Redis/KV Store
+   * Initialize SQLite tables for Queue, Dead Letter Queue (DLQ), Redis/KV Store,
+   * Deduplication cache, and Delivery Audit Logs.
    */
   private async initDatabase(): Promise<void> {
     await this.ctx.storage.sql.exec(`
@@ -62,6 +65,41 @@ export class StashStorage extends DurableObject {
 
       CREATE INDEX IF NOT EXISTS idx_dlq_group ON queue_dlq(group_id);
 
+      -- Deduplication table with persistent TTL
+      CREATE TABLE IF NOT EXISTS queue_dedup (
+        dedup_id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_dedup_expires ON queue_dedup(expires_at);
+
+      -- Delivery logs for monitoring & audit
+      CREATE TABLE IF NOT EXISTS delivery_logs (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL,
+        group_id TEXT NOT NULL,
+        url TEXT NOT NULL,
+        method TEXT DEFAULT 'POST',
+        status_code INTEGER,
+        success INTEGER NOT NULL,
+        latency_ms INTEGER NOT NULL,
+        retries INTEGER NOT NULL,
+        error TEXT,
+        delivered_at INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_logs_delivered_at ON delivery_logs(group_id, delivered_at DESC);
+
+      -- Known groups registry
+      CREATE TABLE IF NOT EXISTS group_registry (
+        group_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        last_activity_at INTEGER NOT NULL
+      );
+
+      -- KV Key Registry
       CREATE TABLE IF NOT EXISTS kv_store (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -71,6 +109,33 @@ export class StashStorage extends DurableObject {
       );
 
       CREATE INDEX IF NOT EXISTS idx_kv_expires ON kv_store(expires_at);
+
+      -- Redis Sorted Sets (ZSET)
+      CREATE TABLE IF NOT EXISTS redis_zset (
+        key TEXT NOT NULL,
+        member TEXT NOT NULL,
+        score REAL NOT NULL,
+        PRIMARY KEY (key, member)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_zset_score ON redis_zset(key, score);
+
+      -- Redis Hashes
+      CREATE TABLE IF NOT EXISTS redis_hash (
+        key TEXT NOT NULL,
+        field TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (key, field)
+      );
+
+      -- Redis Lists
+      CREATE TABLE IF NOT EXISTS redis_list (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_list_key ON redis_list(key, id);
     `);
   }
 
@@ -79,7 +144,36 @@ export class StashStorage extends DurableObject {
   // =========================================================================
 
   /**
-   * Publish a message to the queue
+   * Register group in the local registry
+   */
+  async registerGroup(groupId: string): Promise<void> {
+    const now = Date.now();
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO group_registry (group_id, created_at, last_activity_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET last_activity_at = excluded.last_activity_at`,
+      groupId,
+      now,
+      now
+    );
+  }
+
+  /**
+   * List known groups
+   */
+  async listGroups(): Promise<string[]> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT group_id FROM group_registry ORDER BY last_activity_at DESC`
+    );
+    const groups = res.toArray().map((r) => String(r.group_id));
+    if (!groups.includes('default')) {
+      groups.unshift('default');
+    }
+    return groups;
+  }
+
+  /**
+   * Publish a message to the queue with persistent deduplication
    */
   async publishMessage(options: PublishOptions): Promise<PublishResult> {
     const now = Date.now();
@@ -89,6 +183,8 @@ export class StashStorage extends DurableObject {
     const defaultMaxRetries = Number(this.envConfig.TOTAL_RETRIES_BEFORE_DLQ) || 3;
     const maxRetries = options.retries !== undefined ? options.retries : defaultMaxRetries;
 
+    await this.registerGroup(groupId);
+
     const delayParsed = parseDelay(options.delay);
     if (!delayParsed.success) {
       throw new Error(delayParsed.error || 'Invalid delay parameter');
@@ -96,23 +192,40 @@ export class StashStorage extends DurableObject {
 
     const visibilityAt = delayParsed.visibilityAt;
 
-    // Deduplication check
+    // Deduplication check via persistent queue_dedup table
     if (options.dedupId) {
+      // 1. Clean expired entries
+      await this.ctx.storage.sql.exec(
+        `DELETE FROM queue_dedup WHERE expires_at <= ?`,
+        now
+      );
+
+      // 2. Check if dedup_id already exists and is unexpired
       const existing = await this.ctx.storage.sql.exec(
-        `SELECT id, visibility_at FROM queue WHERE dedup_id = ? LIMIT 1`,
+        `SELECT message_id, expires_at FROM queue_dedup WHERE dedup_id = ? LIMIT 1`,
         options.dedupId
       );
       const rows = existing.toArray();
       if (rows.length > 0) {
         return {
-          messageId: String(rows[0].id),
+          messageId: String(rows[0].message_id),
           groupId,
           url: options.url,
-          visibilityAt: Number(rows[0].visibility_at),
-          delayMs: Math.max(0, Number(rows[0].visibility_at) - now),
+          visibilityAt,
+          delayMs: delayParsed.delayMs,
           deduplicated: true,
         };
       }
+
+      // 3. Register dedupId with window (default 2 hours, customizable)
+      const dedupWindowMs = (options.dedupWindowSeconds || 2 * 3600) * 1000;
+      await this.ctx.storage.sql.exec(
+        `INSERT INTO queue_dedup (dedup_id, message_id, created_at, expires_at) VALUES (?, ?, ?, ?)`,
+        options.dedupId,
+        messageId,
+        now,
+        now + dedupWindowMs
+      );
     }
 
     const payloadStr =
@@ -209,14 +322,32 @@ export class StashStorage extends DurableObject {
   }
 
   /**
-   * Deliver an individual HTTP message with timeout and error handling
+   * Deliver an individual HTTP message with Upstash HMAC signature, timeout, and audit logging
    */
   private async deliverMessage(msg: QueueMessage): Promise<boolean> {
+    const startTime = Date.now();
     const timeoutSeconds = Number(this.envConfig.HTTP_REQUEST_TIMEOUT) || 15;
     let customHeaders: Record<string, string> = {};
     try {
       customHeaders = JSON.parse(msg.headers || '{}');
     } catch {}
+
+    // Generate Upstash-compatible HMAC-SHA256 signature
+    const signingKey =
+      this.envConfig.QSTASH_CURRENT_SIGNING_KEY ||
+      this.envConfig.API_KEY ||
+      'stash_secret_key';
+
+    let upstashSignature = '';
+    try {
+      upstashSignature = await generateQStashSignature({
+        url: msg.url,
+        body: msg.payload || '',
+        signingKey,
+      });
+    } catch (sigErr) {
+      console.warn('Failed to generate Upstash-Signature:', sigErr);
+    }
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -224,11 +355,13 @@ export class StashStorage extends DurableObject {
       'Upstash-Message-Id': msg.id,
       'Upstash-Group-Id': msg.group_id,
       'Upstash-Retries': String(msg.retries),
+      ...(upstashSignature ? { 'Upstash-Signature': upstashSignature } : {}),
       ...customHeaders,
     };
 
     let success = false;
     let errorDetail = '';
+    let responseStatus: number | null = null;
 
     try {
       const response = await fetch(msg.url, {
@@ -238,6 +371,8 @@ export class StashStorage extends DurableObject {
         signal: AbortSignal.timeout(timeoutSeconds * 1000),
       });
 
+      responseStatus = response.status;
+
       if (response.ok) {
         success = true;
       } else {
@@ -245,6 +380,40 @@ export class StashStorage extends DurableObject {
       }
     } catch (err: any) {
       errorDetail = err?.message || 'Network / Timeout Error';
+    }
+
+    const latencyMs = Date.now() - startTime;
+
+    // Record delivery attempt into audit logs
+    try {
+      await this.ctx.storage.sql.exec(
+        `INSERT INTO delivery_logs (
+          id, message_id, group_id, url, method, status_code, success, latency_ms, retries, error, delivered_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        crypto.randomUUID(),
+        msg.id,
+        msg.group_id,
+        msg.url,
+        msg.method || 'POST',
+        responseStatus,
+        success ? 1 : 0,
+        latencyMs,
+        msg.retries,
+        errorDetail || null,
+        Date.now()
+      );
+
+      // Keep recent 300 logs per group
+      await this.ctx.storage.sql.exec(
+        `DELETE FROM delivery_logs
+         WHERE id NOT IN (
+           SELECT id FROM delivery_logs WHERE group_id = ? ORDER BY delivered_at DESC LIMIT 300
+         ) AND group_id = ?`,
+        msg.group_id,
+        msg.group_id
+      );
+    } catch (logErr) {
+      console.warn('Failed to insert delivery log:', logErr);
     }
 
     if (success) {
@@ -259,6 +428,7 @@ export class StashStorage extends DurableObject {
           groupId: msg.group_id,
           url: msg.url,
           retries: msg.retries,
+          latencyMs,
         }));
       }
       return true;
@@ -295,6 +465,7 @@ export class StashStorage extends DurableObject {
             url: msg.url,
             retries: nextRetries,
             error: errorDetail,
+            latencyMs,
           }));
         }
       } else {
@@ -411,6 +582,11 @@ export class StashStorage extends DurableObject {
       now
     );
 
+    const deliveryCountQuery = await this.ctx.storage.sql.exec(
+      `SELECT count(id) as count FROM delivery_logs WHERE group_id = ?`,
+      group
+    );
+
     return {
       group_id: group,
       pending: Number(pendingQuery.toArray()[0]?.count) || 0,
@@ -418,6 +594,7 @@ export class StashStorage extends DurableObject {
       processing: Number(processingQuery.toArray()[0]?.count) || 0,
       dlq: Number(dlqQuery.toArray()[0]?.count) || 0,
       kvKeysCount: Number(kvCountQuery.toArray()[0]?.count) || 0,
+      deliveryCount: Number(deliveryCountQuery.toArray()[0]?.count) || 0,
     };
   }
 
@@ -456,6 +633,32 @@ export class StashStorage extends DurableObject {
     );
 
     return result.toArray() as unknown as DLQMessage[];
+  }
+
+  /**
+   * Retrieve Delivery Logs
+   */
+  async getDeliveryLogs(groupId: string, limit: number = 50, offset: number = 0): Promise<DeliveryLog[]> {
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT id, message_id, group_id, url, method, status_code, success, latency_ms, retries, error, delivered_at
+       FROM delivery_logs
+       WHERE group_id = ?
+       ORDER BY delivered_at DESC
+       LIMIT ? OFFSET ?`,
+      groupId,
+      limit,
+      offset
+    );
+
+    return result.toArray() as unknown as DeliveryLog[];
+  }
+
+  /**
+   * Clear Delivery Logs
+   */
+  async clearDeliveryLogs(groupId: string): Promise<boolean> {
+    await this.ctx.storage.sql.exec(`DELETE FROM delivery_logs WHERE group_id = ?`, groupId);
+    return true;
   }
 
   /**
@@ -500,7 +703,7 @@ export class StashStorage extends DurableObject {
    * Delete an active message by ID
    */
   async deleteMessage(id: string): Promise<boolean> {
-    const res = await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE id = ?`, id);
+    await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE id = ?`, id);
     return true;
   }
 
@@ -529,9 +732,23 @@ export class StashStorage extends DurableObject {
   // =========================================================================
 
   private async cleanupExpiredKV(): Promise<void> {
+    const now = Date.now();
+    // Delete expired keys from all related tables
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM redis_zset WHERE key IN (SELECT key FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?)`,
+      now
+    );
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM redis_hash WHERE key IN (SELECT key FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?)`,
+      now
+    );
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM redis_list WHERE key IN (SELECT key FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?)`,
+      now
+    );
     await this.ctx.storage.sql.exec(
       `DELETE FROM kv_store WHERE expires_at IS NOT NULL AND expires_at <= ?`,
-      Date.now()
+      now
     );
   }
 
@@ -548,7 +765,7 @@ export class StashStorage extends DurableObject {
     if (!row) return null;
 
     if (row.expires_at !== null && Number(row.expires_at) <= now) {
-      await this.ctx.storage.sql.exec(`DELETE FROM kv_store WHERE key = ?`, key);
+      await this.kvDel(key);
       return null;
     }
 
@@ -586,6 +803,7 @@ export class StashStorage extends DurableObject {
        VALUES (?, ?, 'string', ?, ?)
        ON CONFLICT(key) DO UPDATE SET
          value = excluded.value,
+         type = 'string',
          expires_at = excluded.expires_at,
          updated_at = excluded.updated_at`,
       key,
@@ -609,10 +827,11 @@ export class StashStorage extends DurableObject {
     );
     const count = Number(check.toArray()[0]?.count) || 0;
 
-    await this.ctx.storage.sql.exec(
-      `DELETE FROM kv_store WHERE key IN (${placeholders})`,
-      ...keys
-    );
+    await this.ctx.storage.sql.exec(`DELETE FROM kv_store WHERE key IN (${placeholders})`, ...keys);
+    await this.ctx.storage.sql.exec(`DELETE FROM redis_zset WHERE key IN (${placeholders})`, ...keys);
+    await this.ctx.storage.sql.exec(`DELETE FROM redis_hash WHERE key IN (${placeholders})`, ...keys);
+    await this.ctx.storage.sql.exec(`DELETE FROM redis_list WHERE key IN (${placeholders})`, ...keys);
+
     return count;
   }
 
@@ -675,7 +894,7 @@ export class StashStorage extends DurableObject {
 
     const remainingSec = Math.ceil((Number(row.expires_at) - Date.now()) / 1000);
     if (remainingSec <= 0) {
-      await this.ctx.storage.sql.exec(`DELETE FROM kv_store WHERE key = ?`, key);
+      await this.kvDel(key);
       return -2;
     }
     return remainingSec;
@@ -699,6 +918,9 @@ export class StashStorage extends DurableObject {
    */
   async kvFlushDb(): Promise<'OK'> {
     await this.ctx.storage.sql.exec(`DELETE FROM kv_store`);
+    await this.ctx.storage.sql.exec(`DELETE FROM redis_zset`);
+    await this.ctx.storage.sql.exec(`DELETE FROM redis_hash`);
+    await this.ctx.storage.sql.exec(`DELETE FROM redis_list`);
     return 'OK';
   }
 
@@ -727,7 +949,7 @@ export class StashStorage extends DurableObject {
       }
       return {
         key: String(r.key),
-        value: String(r.value),
+        value: String(r.value || ''),
         type: String(r.type || 'string'),
         ttl,
         updatedAt: Number(r.updated_at),
@@ -735,9 +957,415 @@ export class StashStorage extends DurableObject {
     });
   }
 
+  // =========================================================================
+  // REDIS SORTED SETS (ZSET) - Enables @upstash/ratelimit
+  // =========================================================================
+
+  async kvZAdd(
+    key: string,
+    items: Array<{ score: number; member: string }>,
+    options?: { nx?: boolean; xx?: boolean; ch?: boolean }
+  ): Promise<number> {
+    const now = Date.now();
+    let addedOrUpdatedCount = 0;
+
+    // Ensure key exists in kv_store with type 'zset'
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO kv_store (key, value, type, updated_at)
+       VALUES (?, '', 'zset', ?)
+       ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at, type = 'zset'`,
+      key,
+      now
+    );
+
+    for (const item of items) {
+      const existing = await this.ctx.storage.sql.exec(
+        `SELECT score FROM redis_zset WHERE key = ? AND member = ?`,
+        key,
+        item.member
+      );
+      const rows = existing.toArray();
+
+      if (options?.nx && rows.length > 0) continue;
+      if (options?.xx && rows.length === 0) continue;
+
+      if (rows.length === 0) {
+        await this.ctx.storage.sql.exec(
+          `INSERT INTO redis_zset (key, member, score) VALUES (?, ?, ?)`,
+          key,
+          item.member,
+          item.score
+        );
+        addedOrUpdatedCount++;
+      } else {
+        if (Number(rows[0].score) !== item.score) {
+          await this.ctx.storage.sql.exec(
+            `UPDATE redis_zset SET score = ? WHERE key = ? AND member = ?`,
+            item.score,
+            key,
+            item.member
+          );
+          if (options?.ch) addedOrUpdatedCount++;
+        }
+      }
+    }
+
+    return addedOrUpdatedCount;
+  }
+
+  async kvZRange(
+    key: string,
+    min: number | string,
+    max: number | string,
+    options?: { byScore?: boolean; rev?: boolean; withScores?: boolean; offset?: number; count?: number }
+  ): Promise<any[]> {
+    let sql: string;
+    let params: any[] = [];
+
+    if (options?.byScore) {
+      const minScore = min === '-inf' ? -Infinity : Number(min);
+      const maxScore = max === '+inf' ? Infinity : Number(max);
+
+      sql = `SELECT member, score FROM redis_zset WHERE key = ? AND score >= ? AND score <= ? ORDER BY score ${options.rev ? 'DESC' : 'ASC'}, member ${options.rev ? 'DESC' : 'ASC'}`;
+      params = [key, minScore, maxScore];
+    } else {
+      sql = `SELECT member, score FROM redis_zset WHERE key = ? ORDER BY score ${options?.rev ? 'DESC' : 'ASC'}, member ${options?.rev ? 'DESC' : 'ASC'}`;
+      params = [key];
+    }
+
+    if (options?.count !== undefined && options.offset !== undefined) {
+      sql += ` LIMIT ? OFFSET ?`;
+      params.push(options.count, options.offset);
+    }
+
+    const res = await this.ctx.storage.sql.exec(sql, ...params);
+    const rows = res.toArray();
+
+    if (!options?.byScore && min !== undefined && max !== undefined) {
+      const start = Number(min);
+      const stop = Number(max);
+      const sliceStart = start < 0 ? Math.max(0, rows.length + start) : start;
+      const sliceEnd = stop < 0 ? rows.length + stop + 1 : stop + 1;
+      const sliced = rows.slice(sliceStart, sliceEnd);
+
+      if (options?.withScores) {
+        const out: any[] = [];
+        for (const r of sliced) {
+          out.push(String(r.member), Number(r.score));
+        }
+        return out;
+      }
+      return sliced.map((r) => String(r.member));
+    }
+
+    if (options?.withScores) {
+      const out: any[] = [];
+      for (const r of rows) {
+        out.push(String(r.member), Number(r.score));
+      }
+      return out;
+    }
+
+    return rows.map((r) => String(r.member));
+  }
+
+  async kvZRemRangeByScore(key: string, min: number | string, max: number | string): Promise<number> {
+    const minScore = min === '-inf' ? -Infinity : Number(min);
+    const maxScore = max === '+inf' ? Infinity : Number(max);
+
+    const countRes = await this.ctx.storage.sql.exec(
+      `SELECT count(member) as cnt FROM redis_zset WHERE key = ? AND score >= ? AND score <= ?`,
+      key,
+      minScore,
+      maxScore
+    );
+    const count = Number(countRes.toArray()[0]?.cnt) || 0;
+
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM redis_zset WHERE key = ? AND score >= ? AND score <= ?`,
+      key,
+      minScore,
+      maxScore
+    );
+
+    return count;
+  }
+
+  async kvZRem(key: string, ...members: string[]): Promise<number> {
+    if (members.length === 0) return 0;
+    const placeholders = members.map(() => '?').join(',');
+    const check = await this.ctx.storage.sql.exec(
+      `SELECT count(member) as cnt FROM redis_zset WHERE key = ? AND member IN (${placeholders})`,
+      key,
+      ...members
+    );
+    const count = Number(check.toArray()[0]?.cnt) || 0;
+
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM redis_zset WHERE key = ? AND member IN (${placeholders})`,
+      key,
+      ...members
+    );
+    return count;
+  }
+
+  async kvZCard(key: string): Promise<number> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT count(member) as cnt FROM redis_zset WHERE key = ?`,
+      key
+    );
+    return Number(res.toArray()[0]?.cnt) || 0;
+  }
+
+  async kvZScore(key: string, member: string): Promise<number | null> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT score FROM redis_zset WHERE key = ? AND member = ? LIMIT 1`,
+      key,
+      member
+    );
+    const row = res.toArray()[0];
+    return row ? Number(row.score) : null;
+  }
+
+  async kvZIncrBy(key: string, increment: number, member: string): Promise<number> {
+    const currentScore = await this.kvZScore(key, member);
+    const newScore = (currentScore ?? 0) + increment;
+    await this.kvZAdd(key, [{ score: newScore, member }]);
+    return newScore;
+  }
+
+  // =========================================================================
+  // REDIS HASHES
+  // =========================================================================
+
+  async kvHSet(key: string, entries: Record<string, string>): Promise<number> {
+    const now = Date.now();
+    let fieldsAdded = 0;
+
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO kv_store (key, value, type, updated_at)
+       VALUES (?, '', 'hash', ?)
+       ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at, type = 'hash'`,
+      key,
+      now
+    );
+
+    for (const [field, val] of Object.entries(entries)) {
+      const existing = await this.ctx.storage.sql.exec(
+        `SELECT field FROM redis_hash WHERE key = ? AND field = ?`,
+        key,
+        field
+      );
+      if (existing.toArray().length === 0) {
+        fieldsAdded++;
+      }
+
+      await this.ctx.storage.sql.exec(
+        `INSERT INTO redis_hash (key, field, value) VALUES (?, ?, ?)
+         ON CONFLICT(key, field) DO UPDATE SET value = excluded.value`,
+        key,
+        field,
+        String(val)
+      );
+    }
+
+    return fieldsAdded;
+  }
+
+  async kvHGet(key: string, field: string): Promise<string | null> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT value FROM redis_hash WHERE key = ? AND field = ? LIMIT 1`,
+      key,
+      field
+    );
+    const row = res.toArray()[0];
+    return row ? String(row.value) : null;
+  }
+
+  async kvHMGet(key: string, ...fields: string[]): Promise<(string | null)[]> {
+    const results: (string | null)[] = [];
+    for (const f of fields) {
+      results.push(await this.kvHGet(key, f));
+    }
+    return results;
+  }
+
+  async kvHGetAll(key: string): Promise<Record<string, string>> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT field, value FROM redis_hash WHERE key = ?`,
+      key
+    );
+    const map: Record<string, string> = {};
+    for (const row of res.toArray()) {
+      map[String(row.field)] = String(row.value);
+    }
+    return map;
+  }
+
+  async kvHDel(key: string, ...fields: string[]): Promise<number> {
+    if (fields.length === 0) return 0;
+    const placeholders = fields.map(() => '?').join(',');
+    const check = await this.ctx.storage.sql.exec(
+      `SELECT count(field) as cnt FROM redis_hash WHERE key = ? AND field IN (${placeholders})`,
+      key,
+      ...fields
+    );
+    const count = Number(check.toArray()[0]?.cnt) || 0;
+
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM redis_hash WHERE key = ? AND field IN (${placeholders})`,
+      key,
+      ...fields
+    );
+    return count;
+  }
+
+  async kvHExists(key: string, field: string): Promise<number> {
+    const val = await this.kvHGet(key, field);
+    return val !== null ? 1 : 0;
+  }
+
+  async kvHLen(key: string): Promise<number> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT count(field) as cnt FROM redis_hash WHERE key = ?`,
+      key
+    );
+    return Number(res.toArray()[0]?.cnt) || 0;
+  }
+
+  async kvHIncrBy(key: string, field: string, increment: number): Promise<number> {
+    const current = await this.kvHGet(key, field);
+    let val = 0;
+    if (current !== null) {
+      val = parseInt(current, 10);
+      if (isNaN(val)) throw new Error('ERR hash value is not an integer');
+    }
+    const newVal = val + increment;
+    await this.kvHSet(key, { [field]: String(newVal) });
+    return newVal;
+  }
+
+  // =========================================================================
+  // REDIS LISTS
+  // =========================================================================
+
+  async kvLPush(key: string, ...values: string[]): Promise<number> {
+    const now = Date.now();
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO kv_store (key, value, type, updated_at)
+       VALUES (?, '', 'list', ?)
+       ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at, type = 'list'`,
+      key,
+      now
+    );
+
+    // In LPUSH, elements are inserted at the head (we insert with lowest id or prepend)
+    // To maintain prepend order:
+    const minIdRes = await this.ctx.storage.sql.exec(
+      `SELECT MIN(id) as min_id FROM redis_list WHERE key = ?`,
+      key
+    );
+    let baseId = (Number(minIdRes.toArray()[0]?.min_id) || 0) - 1;
+
+    for (const v of values) {
+      await this.ctx.storage.sql.exec(
+        `INSERT INTO redis_list (id, key, value) VALUES (?, ?, ?)`,
+        baseId--,
+        key,
+        v
+      );
+    }
+
+    return await this.kvLLen(key);
+  }
+
+  async kvRPush(key: string, ...values: string[]): Promise<number> {
+    const now = Date.now();
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO kv_store (key, value, type, updated_at)
+       VALUES (?, '', 'list', ?)
+       ON CONFLICT(key) DO UPDATE SET updated_at = excluded.updated_at, type = 'list'`,
+      key,
+      now
+    );
+
+    for (const v of values) {
+      await this.ctx.storage.sql.exec(
+        `INSERT INTO redis_list (key, value) VALUES (?, ?)`,
+        key,
+        v
+      );
+    }
+
+    return await this.kvLLen(key);
+  }
+
+  async kvLPop(key: string, count: number = 1): Promise<string | string[] | null> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT id, value FROM redis_list WHERE key = ? ORDER BY id ASC LIMIT ?`,
+      key,
+      count
+    );
+    const rows = res.toArray();
+    if (rows.length === 0) return null;
+
+    const ids = rows.map((r) => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM redis_list WHERE id IN (${placeholders})`,
+      ...ids
+    );
+
+    if (count === 1) return String(rows[0].value);
+    return rows.map((r) => String(r.value));
+  }
+
+  async kvRPop(key: string, count: number = 1): Promise<string | string[] | null> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT id, value FROM redis_list WHERE key = ? ORDER BY id DESC LIMIT ?`,
+      key,
+      count
+    );
+    const rows = res.toArray();
+    if (rows.length === 0) return null;
+
+    const ids = rows.map((r) => r.id);
+    const placeholders = ids.map(() => '?').join(',');
+    await this.ctx.storage.sql.exec(
+      `DELETE FROM redis_list WHERE id IN (${placeholders})`,
+      ...ids
+    );
+
+    if (count === 1) return String(rows[0].value);
+    return rows.map((r) => String(r.value));
+  }
+
+  async kvLLen(key: string): Promise<number> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT count(id) as cnt FROM redis_list WHERE key = ?`,
+      key
+    );
+    return Number(res.toArray()[0]?.cnt) || 0;
+  }
+
+  async kvLRange(key: string, start: number, stop: number): Promise<string[]> {
+    const res = await this.ctx.storage.sql.exec(
+      `SELECT value FROM redis_list WHERE key = ? ORDER BY id ASC`,
+      key
+    );
+    const rows = res.toArray();
+    const sliceStart = start < 0 ? Math.max(0, rows.length + start) : start;
+    const sliceEnd = stop < 0 ? rows.length + stop + 1 : stop + 1;
+    return rows.slice(sliceStart, sliceEnd).map((r) => String(r.value));
+  }
+
+  // =========================================================================
+  // REDIS COMMAND DISPATCHER
+  // =========================================================================
+
   /**
    * Generic Command Runner for Upstash Redis compatibility:
-   * Supports ["SET", "k", "v"], ["GET", "k"], ["INCR", "k"], etc.
+   * Supports String, Hash, ZSet, List, and Key operations.
    */
   async executeRedisCommand(cmd: string, args: any[]): Promise<any> {
     const command = cmd.toUpperCase();
@@ -746,6 +1374,7 @@ export class StashStorage extends DurableObject {
       case 'PING':
         return args[0] || 'PONG';
 
+      // --- STRING COMMANDS ---
       case 'GET': {
         const [key] = args;
         if (!key) throw new Error('ERR wrong number of arguments for "get" command');
@@ -847,8 +1476,193 @@ export class StashStorage extends DurableObject {
         return await this.kvFlushDb();
       }
 
+      // --- SORTED SET (ZSET) COMMANDS (For @upstash/ratelimit) ---
+      case 'ZADD': {
+        const [key, ...rest] = args;
+        if (!key || rest.length < 2) throw new Error('ERR wrong number of arguments for "zadd" command');
+
+        let i = 0;
+        const opts: { nx?: boolean; xx?: boolean; ch?: boolean } = {};
+        while (i < rest.length && isNaN(Number(rest[i]))) {
+          const flag = String(rest[i]).toUpperCase();
+          if (flag === 'NX') opts.nx = true;
+          if (flag === 'XX') opts.xx = true;
+          if (flag === 'CH') opts.ch = true;
+          i++;
+        }
+
+        const items: Array<{ score: number; member: string }> = [];
+        for (; i < rest.length; i += 2) {
+          const score = Number(rest[i]);
+          const member = String(rest[i + 1]);
+          if (isNaN(score) || member === undefined) {
+            throw new Error('ERR syntax error in zadd arguments');
+          }
+          items.push({ score, member });
+        }
+
+        return await this.kvZAdd(String(key), items, opts);
+      }
+
+      case 'ZRANGE': {
+        const [key, min, max, ...extra] = args;
+        if (!key || min === undefined || max === undefined) throw new Error('ERR wrong number of arguments for "zrange" command');
+
+        const opts: { byScore?: boolean; rev?: boolean; withScores?: boolean; offset?: number; count?: number } = {};
+        for (let i = 0; i < extra.length; i++) {
+          const flag = String(extra[i]).toUpperCase();
+          if (flag === 'BYSCORE') opts.byScore = true;
+          else if (flag === 'REV') opts.rev = true;
+          else if (flag === 'WITHSCORES') opts.withScores = true;
+          else if (flag === 'LIMIT' && extra[i + 1] !== undefined && extra[i + 2] !== undefined) {
+            opts.offset = parseInt(extra[++i], 10);
+            opts.count = parseInt(extra[++i], 10);
+          }
+        }
+
+        return await this.kvZRange(String(key), min, max, opts);
+      }
+
+      case 'ZRANGEBYSCORE': {
+        const [key, min, max, ...extra] = args;
+        if (!key || min === undefined || max === undefined) throw new Error('ERR wrong number of arguments for "zrangebyscore" command');
+
+        const opts: { byScore: boolean; rev?: boolean; withScores?: boolean; offset?: number; count?: number } = { byScore: true };
+        for (let i = 0; i < extra.length; i++) {
+          const flag = String(extra[i]).toUpperCase();
+          if (flag === 'WITHSCORES') opts.withScores = true;
+          else if (flag === 'LIMIT' && extra[i + 1] !== undefined && extra[i + 2] !== undefined) {
+            opts.offset = parseInt(extra[++i], 10);
+            opts.count = parseInt(extra[++i], 10);
+          }
+        }
+
+        return await this.kvZRange(String(key), min, max, opts);
+      }
+
+      case 'ZREMRANGEBYSCORE': {
+        const [key, min, max] = args;
+        if (!key || min === undefined || max === undefined) throw new Error('ERR wrong number of arguments for "zremrangebyscore" command');
+        return await this.kvZRemRangeByScore(String(key), min, max);
+      }
+
+      case 'ZREM': {
+        const [key, ...members] = args;
+        if (!key || members.length === 0) throw new Error('ERR wrong number of arguments for "zrem" command');
+        return await this.kvZRem(String(key), ...members.map(String));
+      }
+
+      case 'ZCARD': {
+        const [key] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "zcard" command');
+        return await this.kvZCard(String(key));
+      }
+
+      case 'ZSCORE': {
+        const [key, member] = args;
+        if (!key || member === undefined) throw new Error('ERR wrong number of arguments for "zscore" command');
+        return await this.kvZScore(String(key), String(member));
+      }
+
+      case 'ZINCRBY': {
+        const [key, increment, member] = args;
+        if (!key || increment === undefined || member === undefined) throw new Error('ERR wrong number of arguments for "zincrby" command');
+        return await this.kvZIncrBy(String(key), Number(increment), String(member));
+      }
+
+      // --- HASH COMMANDS ---
+      case 'HSET': {
+        const [key, ...rest] = args;
+        if (!key || rest.length < 2 || rest.length % 2 !== 0) throw new Error('ERR wrong number of arguments for "hset" command');
+
+        const map: Record<string, string> = {};
+        for (let i = 0; i < rest.length; i += 2) {
+          map[String(rest[i])] = String(rest[i + 1]);
+        }
+        return await this.kvHSet(String(key), map);
+      }
+
+      case 'HGET': {
+        const [key, field] = args;
+        if (!key || !field) throw new Error('ERR wrong number of arguments for "hget" command');
+        return await this.kvHGet(String(key), String(field));
+      }
+
+      case 'HMGET': {
+        const [key, ...fields] = args;
+        if (!key || fields.length === 0) throw new Error('ERR wrong number of arguments for "hmget" command');
+        return await this.kvHMGet(String(key), ...fields.map(String));
+      }
+
+      case 'HGETALL': {
+        const [key] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "hgetall" command');
+        return await this.kvHGetAll(String(key));
+      }
+
+      case 'HDEL': {
+        const [key, ...fields] = args;
+        if (!key || fields.length === 0) throw new Error('ERR wrong number of arguments for "hdel" command');
+        return await this.kvHDel(String(key), ...fields.map(String));
+      }
+
+      case 'HEXISTS': {
+        const [key, field] = args;
+        if (!key || !field) throw new Error('ERR wrong number of arguments for "hexists" command');
+        return await this.kvHExists(String(key), String(field));
+      }
+
+      case 'HLEN': {
+        const [key] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "hlen" command');
+        return await this.kvHLen(String(key));
+      }
+
+      case 'HINCRBY': {
+        const [key, field, increment] = args;
+        if (!key || !field || increment === undefined) throw new Error('ERR wrong number of arguments for "hincrby" command');
+        return await this.kvHIncrBy(String(key), String(field), parseInt(increment, 10));
+      }
+
+      // --- LIST COMMANDS ---
+      case 'LPUSH': {
+        const [key, ...values] = args;
+        if (!key || values.length === 0) throw new Error('ERR wrong number of arguments for "lpush" command');
+        return await this.kvLPush(String(key), ...values.map(String));
+      }
+
+      case 'RPUSH': {
+        const [key, ...values] = args;
+        if (!key || values.length === 0) throw new Error('ERR wrong number of arguments for "rpush" command');
+        return await this.kvRPush(String(key), ...values.map(String));
+      }
+
+      case 'LPOP': {
+        const [key, count] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "lpop" command');
+        return await this.kvLPop(String(key), count ? parseInt(count, 10) : 1);
+      }
+
+      case 'RPOP': {
+        const [key, count] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "rpop" command');
+        return await this.kvRPop(String(key), count ? parseInt(count, 10) : 1);
+      }
+
+      case 'LLEN': {
+        const [key] = args;
+        if (!key) throw new Error('ERR wrong number of arguments for "llen" command');
+        return await this.kvLLen(String(key));
+      }
+
+      case 'LRANGE': {
+        const [key, start, stop] = args;
+        if (!key || start === undefined || stop === undefined) throw new Error('ERR wrong number of arguments for "lrange" command');
+        return await this.kvLRange(String(key), parseInt(start, 10), parseInt(stop, 10));
+      }
+
       case 'INFO': {
-        return `# Server\ncloudflare_stash_version:1.0.0\nos:cloudflare-workers\nstorage:sqlite-durable-objects\n`;
+        return `# Server\ncloudflare_stash_version:1.1.0\nos:cloudflare-workers\nstorage:sqlite-durable-objects\nmodules:zset,hash,list,string\n`;
       }
 
       default:

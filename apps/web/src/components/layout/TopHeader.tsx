@@ -6,11 +6,14 @@ import {
   LogOut,
   User,
   ExternalLink,
+  ChevronDown,
+  Check,
 } from 'lucide-react';
 import { EdgekitLogo } from '../common/EdgekitLogo';
 import { useI18n } from '../../i18n/context';
 import { useTheme } from '../../theme/context';
 import { useAuth } from '../../context/auth-context';
+import { useGroup } from '../../context/group-context';
 import { useSidebar, SidebarTrigger } from '@/components/ui/sidebar';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -42,6 +45,7 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ clusterStatus = 'online' }
   const { locale, setLocale, t } = useI18n();
   const { resolvedTheme, toggleTheme } = useTheme();
   const { logout } = useAuth();
+  const { currentGroup, setCurrentGroup, groups } = useGroup();
   const { state } = useSidebar();
 
   const routerState = useRouterState();
@@ -53,6 +57,8 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ clusterStatus = 'online' }
         return t.breadcrumbs.messages;
       case '/dlq':
         return t.breadcrumbs.dlq;
+      case '/logs':
+        return locale === 'pt-BR' ? 'Logs de Entrega' : 'Delivery Logs';
       case '/redis':
         return t.breadcrumbs.redis;
       case '/snippets':
@@ -85,9 +91,51 @@ export const TopHeader: React.FC<TopHeaderProps> = ({ clusterStatus = 'online' }
             <div className="flex items-center gap-1.5 overflow-hidden whitespace-nowrap">
               <span className="font-bold tracking-tight text-foreground text-sm">Edgekit</span>
               <span className="font-semibold text-pink-500 text-sm">Queue</span>
-              <span className="ml-1 rounded px-1.5 py-0.2 text-[10px] font-mono font-medium bg-muted text-muted-foreground border border-border">
-                default
-              </span>
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <button
+                      type="button"
+                      className="ml-1 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono font-medium bg-muted hover:bg-muted/80 text-foreground border border-border cursor-pointer transition-colors"
+                      title={locale === 'pt-BR' ? 'Alternar Grupo de Fila' : 'Switch Queue Group'}
+                    >
+                      <span className="max-w-[80px] truncate">{currentGroup}</span>
+                      <ChevronDown className="size-2.5 text-muted-foreground" />
+                    </button>
+                  }
+                />
+                <DropdownMenuContent align="start" className="w-48">
+                  <DropdownMenuLabel className="text-xs">
+                    {locale === 'pt-BR' ? 'Grupos de Fila' : 'Queue Groups'}
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  {groups.map((g) => (
+                    <DropdownMenuItem
+                      key={g}
+                      onClick={() => setCurrentGroup(g)}
+                      className={cn(
+                        'text-xs font-mono flex items-center justify-between cursor-pointer',
+                        g === currentGroup && 'bg-pink-500/10 text-pink-500 font-bold'
+                      )}
+                    >
+                      <span>{g}</span>
+                      {g === currentGroup && <Check className="size-3 text-pink-500" />}
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onClick={() => {
+                      const name = window.prompt(
+                        locale === 'pt-BR' ? 'Nome do grupo:' : 'Group name:'
+                      );
+                      if (name && name.trim()) setCurrentGroup(name.trim());
+                    }}
+                    className="text-xs text-pink-500 cursor-pointer font-medium"
+                  >
+                    + {locale === 'pt-BR' ? 'Criar / Mudar Grupo' : 'Add / Switch Group'}
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
           )}
         </Link>

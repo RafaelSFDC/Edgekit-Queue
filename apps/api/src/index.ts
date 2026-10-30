@@ -43,6 +43,7 @@ app.use('*', async (c, next) => {
   if (
     path === '/health' ||
     path === '/api/info' ||
+    path === '/v2/keys' ||
     path.startsWith('/api/v1/auth')
   ) {
     return next();
@@ -124,6 +125,7 @@ app.notFound(async (c) => {
     path.startsWith('/v2') ||
     path.startsWith('/messages') ||
     path.startsWith('/dlq') ||
+    path.startsWith('/logs') ||
     path.startsWith('/get') ||
     path.startsWith('/set') ||
     path.startsWith('/del') ||
@@ -148,12 +150,15 @@ export default {
   // Standard fetch handler powered by Hono
   fetch: app.fetch,
 
-  // Native Cloudflare Worker Cron Trigger (scheduled sweep)
+  // Native Cloudflare Worker Cron Trigger (scheduled sweep across all known groups)
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     console.log('[Edgekit Queue] Scheduled heartbeat sweep running...', event.cron);
     try {
-      const stub = getStashStub(env, 'default');
-      ctx.waitUntil(stub.consumeQueue(20));
+      const coordStub = getStashStub(env, 'default');
+      const groups = await coordStub.listGroups();
+      for (const group of groups.slice(0, 10)) {
+        ctx.waitUntil(getStashStub(env, group).consumeQueue(20));
+      }
     } catch (err) {
       console.error('[Edgekit Queue] Scheduled sweep error:', err);
     }

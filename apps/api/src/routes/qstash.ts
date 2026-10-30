@@ -28,6 +28,28 @@ function extractForwardHeaders(headers: Headers): Record<string, string> {
 }
 
 /**
+ * Upstash QStash Keys endpoint: GET /v2/keys
+ * Used by Upstash Receiver SDK to fetch current & next signing keys
+ */
+qstashRouter.get('/v2/keys', (c) => {
+  const current = c.env.QSTASH_CURRENT_SIGNING_KEY || c.env.API_KEY || 'stash_secret_key';
+  const next = c.env.QSTASH_NEXT_SIGNING_KEY || current;
+  return c.json({
+    current,
+    next,
+  });
+});
+
+/**
+ * List known groups
+ */
+qstashRouter.get('/api/v1/groups', async (c) => {
+  const stub = getStashStub(c.env, 'default');
+  const groups = await stub.listGroups();
+  return c.json({ groups });
+});
+
+/**
  * Standard /publish endpoint (Supports both query params and JSON body, simple-queue compatible)
  */
 qstashRouter.post('/publish', async (c) => {
@@ -57,7 +79,7 @@ qstashRouter.post('/publish', async (c) => {
 
   // If body has a nested payload field or is the entire body
   let payload = body;
-  if (typeof body === 'object' && body !== null && 'payload' in body && Object.keys(body).length <= 4) {
+  if (typeof body === 'object' && body !== null && 'payload' in body && Object.keys(body).length <= 5) {
     payload = body.payload;
   }
 
@@ -89,6 +111,9 @@ qstashRouter.post('/publish', async (c) => {
     c.req.header('upstash-dedup-id') ||
     undefined;
 
+  const dedupWindowHeader = query.dedupWindow || body?.dedupWindow || c.req.header('upstash-deduplication-timeout');
+  const dedupWindowSeconds = dedupWindowHeader !== undefined ? parseInt(String(dedupWindowHeader), 10) : undefined;
+
   const method = (query.method || body?.method || c.req.header('upstash-method') || 'POST').toUpperCase();
   const forwardHeaders = {
     ...extractForwardHeaders(c.req.raw.headers),
@@ -105,9 +130,14 @@ qstashRouter.post('/publish', async (c) => {
     method,
     callbackUrl,
     dedupId,
+    dedupWindowSeconds,
   };
 
   try {
+    // Record group in default coordinator
+    const coordStub = getStashStub(c.env, 'default');
+    await coordStub.registerGroup(groupId);
+
     const stub = getStashStub(c.env, groupId);
     const result = await stub.publishMessage(publishOptions);
     return c.json(result, 201);
@@ -143,10 +173,17 @@ qstashRouter.post('/v2/publish/:destination{.+}', async (c) => {
   const retries = retriesHeader !== undefined ? parseInt(retriesHeader, 10) : undefined;
   const callbackUrl = c.req.header('upstash-callback') || undefined;
   const dedupId = c.req.header('upstash-dedup-id') || undefined;
+  const dedupWindowHeader = c.req.header('upstash-deduplication-timeout');
+  const dedupWindowSeconds = dedupWindowHeader ? parseInt(dedupWindowHeader, 10) : undefined;
+
   const method = (c.req.header('upstash-method') || 'POST').toUpperCase();
   const forwardHeaders = extractForwardHeaders(c.req.raw.headers);
 
   try {
+    // Record group in default coordinator
+    const coordStub = getStashStub(c.env, 'default');
+    await coordStub.registerGroup(groupId);
+
     const stub = getStashStub(c.env, groupId);
     const result = await stub.publishMessage({
       url: destination,
@@ -158,6 +195,7 @@ qstashRouter.post('/v2/publish/:destination{.+}', async (c) => {
       method,
       callbackUrl,
       dedupId,
+      dedupWindowSeconds,
     });
 
     return c.json({ messageId: result.messageId, deduplicated: result.deduplicated }, 201);
@@ -245,6 +283,29 @@ qstashRouter.delete('/dlq/:id', async (c) => {
   const stub = getStashStub(c.env, groupId);
   const success = await stub.deleteDLQMessage(id);
   return c.json({ success });
+});
+
+/**
+ * List Delivery Logs (Audit & Monitoring)
+ */
+qstashRouter.get('/logs', async (c) => {
+  const groupId = c.req.query('groupId') || 'default';
+  const limit = parseInt(c.req.query('limit') || '50', 10);
+  const offset = parseInt(c.req.query('offset') || '0', 10);
+
+  const stub = getStashStub(c.env, groupId);
+  const logs = await stub.getDeliveryLogs(groupId, limit, offset);
+  return c.json({ logs });
+});
+
+/**
+ * Clear Delivery Logs
+ */
+qstashRouter.post('/logs/clear', async (c) => {
+  const groupId = c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  await stub.clearDeliveryLogs(groupId);
+  return c.json({ ok: true, cleared: groupId });
 });
 
 /**

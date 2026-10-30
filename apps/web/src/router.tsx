@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import {
   createRootRoute,
   createRoute,
@@ -7,14 +7,29 @@ import {
   Navigate,
 } from '@tanstack/react-router';
 import { DashboardLayout } from './components/layout/DashboardLayout';
-import { LoginPage } from './pages/LoginPage';
-import { OverviewPage } from './pages/OverviewPage';
-import { MessagesPage } from './pages/MessagesPage';
-import { DlqPage } from './pages/DlqPage';
-import { RedisPage } from './pages/RedisPage';
-import { SnippetsPage } from './pages/SnippetsPage';
 import { useAuth } from './context/auth-context';
 import { EdgekitLogo } from './components/common/EdgekitLogo';
+
+// Lazy-loaded pages for optimized bundle size & fast initial paint
+const LoginPage = lazy(() => import('./pages/LoginPage').then((m) => ({ default: m.LoginPage })));
+const OverviewPage = lazy(() => import('./pages/OverviewPage').then((m) => ({ default: m.OverviewPage })));
+const MessagesPage = lazy(() => import('./pages/MessagesPage').then((m) => ({ default: m.MessagesPage })));
+const DlqPage = lazy(() => import('./pages/DlqPage').then((m) => ({ default: m.DlqPage })));
+const LogsPage = lazy(() => import('./pages/LogsPage').then((m) => ({ default: m.LogsPage })));
+const RedisPage = lazy(() => import('./pages/RedisPage').then((m) => ({ default: m.RedisPage })));
+const SnippetsPage = lazy(() => import('./pages/SnippetsPage').then((m) => ({ default: m.SnippetsPage })));
+
+const PageSuspense: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <Suspense
+    fallback={
+      <div className="flex h-64 w-full items-center justify-center text-xs text-muted-foreground animate-pulse">
+        Carregando página...
+      </div>
+    }
+  >
+    {children}
+  </Suspense>
+);
 
 /**
  * Dashboard Guard Component:
@@ -50,7 +65,11 @@ const rootRoute = createRootRoute({
 const loginRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/login',
-  component: LoginPage,
+  component: () => (
+    <PageSuspense>
+      <LoginPage />
+    </PageSuspense>
+  ),
 });
 
 // 3. Protected Dashboard Layout Route
@@ -64,31 +83,61 @@ const dashboardRoute = createRoute({
 const indexRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/',
-  component: OverviewPage,
+  component: () => (
+    <PageSuspense>
+      <OverviewPage />
+    </PageSuspense>
+  ),
 });
 
 const messagesRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/messages',
-  component: MessagesPage,
+  component: () => (
+    <PageSuspense>
+      <MessagesPage />
+    </PageSuspense>
+  ),
 });
 
 const dlqRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/dlq',
-  component: DlqPage,
+  component: () => (
+    <PageSuspense>
+      <DlqPage />
+    </PageSuspense>
+  ),
+});
+
+const logsRoute = createRoute({
+  getParentRoute: () => dashboardRoute,
+  path: '/logs',
+  component: () => (
+    <PageSuspense>
+      <LogsPage />
+    </PageSuspense>
+  ),
 });
 
 const redisRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/redis',
-  component: RedisPage,
+  component: () => (
+    <PageSuspense>
+      <RedisPage />
+    </PageSuspense>
+  ),
 });
 
 const snippetsRoute = createRoute({
   getParentRoute: () => dashboardRoute,
   path: '/snippets',
-  component: SnippetsPage,
+  component: () => (
+    <PageSuspense>
+      <SnippetsPage />
+    </PageSuspense>
+  ),
 });
 
 // 5. Mount Route Tree
@@ -98,6 +147,7 @@ const routeTree = rootRoute.addChildren([
     indexRoute,
     messagesRoute,
     dlqRoute,
+    logsRoute,
     redisRoute,
     snippetsRoute,
   ]),

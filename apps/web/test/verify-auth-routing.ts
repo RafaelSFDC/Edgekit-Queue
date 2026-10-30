@@ -19,7 +19,7 @@ async function testAuthRouting() {
 
   // 2. Validar que as rotas da Dashboard estão aninhadas no layout protegido
   console.log('2. Validando rotas protegidas da Dashboard...');
-  const dashboardRoutes = ['/', '/messages', '/dlq', '/redis', '/snippets'];
+  const dashboardRoutes = ['/', '/messages', '/dlq', '/logs', '/redis', '/snippets'];
   for (const path of dashboardRoutes) {
     const route = routes[path];
     assert.ok(route, `A rota ${path} deve estar registrada`);

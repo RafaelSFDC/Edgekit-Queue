@@ -8,7 +8,7 @@ import { useI18n } from '../i18n/context';
 import { getStoredApiKey } from '../services/api';
 import { copyToClipboard } from '@/lib/utils';
 import { toast } from 'sonner';
-import { Code2, Copy, Check, Terminal, ExternalLink } from 'lucide-react';
+import { Code2, Copy, Check, Terminal } from 'lucide-react';
 
 export const SnippetsPage: React.FC = () => {
   const { t } = useI18n();

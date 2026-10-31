@@ -27,7 +27,7 @@ export const PublishMessageDialog: React.FC<PublishMessageDialogProps> = ({
   const [payload, setPayload] = useState('{\n  "event": "user.signup",\n  "userId": 123\n}');
   const [delay, setDelay] = useState('');
   const [retries, setRetries] = useState('3');
-  const [method, setMethod] = useState('POST');
+  const [method, _setMethod] = useState('POST');
 
   const publishMutation = usePublishMessageMutation();
 

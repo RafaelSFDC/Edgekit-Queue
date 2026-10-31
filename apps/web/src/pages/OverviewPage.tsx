@@ -22,7 +22,6 @@ import {
   Send,
   Plus,
   ArrowRight,
-  ExternalLink,
   CheckCircle2,
   Cpu,
 } from 'lucide-react';
@@ -37,6 +36,7 @@ export const OverviewPage: React.FC = () => {
   const [publishOpen, setPublishOpen] = useState(false);
   const [setKeyOpen, setSetKeyOpen] = useState(false);
   const [selectedMessage, setSelectedMessage] = useState<QueueMessage | null>(null);
+  const [now] = useState(() => Date.now());
 
   const pendingCount = stats?.pending ?? 0;
   const delayedCount = stats?.delayed ?? 0;
@@ -217,12 +217,14 @@ export const OverviewPage: React.FC = () => {
             ) : (
               <div className="divide-y divide-border">
                 {messages.slice(0, 5).map((msg) => {
-                  const isScheduled = msg.visibility_at > Date.now();
+                  const isScheduled = msg.visibility_at > now;
                   return (
-                    <div
+                    <button
                       key={msg.id}
+                      type="button"
+                      aria-label={`Ver detalhes da mensagem ${msg.id}`}
                       onClick={() => setSelectedMessage(msg)}
-                      className="p-3 sm:px-4 flex items-center justify-between hover:bg-muted/30 cursor-pointer transition-colors"
+                      className="w-full text-left p-3 sm:px-4 flex items-center justify-between hover:bg-muted/30 cursor-pointer transition-colors"
                     >
                       <div className="min-w-0 pr-3 space-y-1">
                         <div className="flex items-center gap-2">
@@ -249,7 +251,7 @@ export const OverviewPage: React.FC = () => {
                           {msg.retries} retries
                         </p>
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>

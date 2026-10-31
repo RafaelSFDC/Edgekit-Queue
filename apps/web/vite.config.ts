@@ -1,23 +1,19 @@
 import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
+import viteReact from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    viteReact({
+      compiler: true,
+    }),
+    tailwindcss(),
+  ],
   base: '/',
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    rollupOptions: {
-      output: {
-        manualChunks: {
-          'vendor-react': ['react', 'react-dom'],
-          'vendor-tanstack': ['@tanstack/react-router', '@tanstack/react-query'],
-          'vendor-icons': ['lucide-react'],
-        },
-      },
-    },
   },
   resolve: {
     alias: {

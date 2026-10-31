@@ -3,9 +3,6 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import {
   PageHeader,
-  PageHeaderTitle,
-  PageHeaderDescription,
-  PageHeaderActions,
 } from '../src/components/ui/page-header';
 
 async function testPageHeader() {

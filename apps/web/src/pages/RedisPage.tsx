@@ -26,7 +26,6 @@ import { SetKeyDialog } from '../components/queue/SetKeyDialog';
 import { copyToClipboard } from '@/lib/utils';
 import { toast } from 'sonner';
 import {
-  Database,
   Plus,
   Trash2,
   Search,
@@ -36,7 +35,6 @@ import {
   CheckCircle2,
   Terminal,
   Play,
-  RotateCcw,
 } from 'lucide-react';
 
 export const RedisPage: React.FC = () => {

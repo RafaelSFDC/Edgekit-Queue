@@ -4,7 +4,7 @@ import { PageHeader } from '../components/layout/PageHeader';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import {
   Table,
   TableHeader,
@@ -25,7 +25,6 @@ import {
   AlertTriangle,
   RotateCcw,
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
 
 export const LogsPage: React.FC = () => {
   const { t, locale } = useI18n();

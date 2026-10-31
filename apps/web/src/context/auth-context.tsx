@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback, type ReactNode } from 'react';
+import React, { createContext, useContext, useCallback, type ReactNode } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchAuthMe, loginAuth, logoutAuth } from '../services/api';
 import { queryKeys } from '../hooks/api/query-keys';

@@ -31,7 +31,7 @@ function BreadcrumbItem({ className, ...props }: React.ComponentProps<"li">) {
 
 function BreadcrumbLink({
   className,
-  asChild,
+  asChild: _asChild,
   ...props
 }: React.ComponentProps<"a"> & { asChild?: boolean }) {
   return (

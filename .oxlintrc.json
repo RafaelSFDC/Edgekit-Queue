@@ -1,0 +1,81 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "unicorn", "oxc", "jsx-a11y", "vitest", "promise", "node"],
+  "categories": {
+    "correctness": "warn"
+  },
+  "env": {
+    "browser": true,
+    "node": true,
+    "builtin": true
+  },
+  "globals": {
+    "caches": "readonly",
+    "fetch": "readonly",
+    "Request": "readonly",
+    "Response": "readonly",
+    "Headers": "readonly",
+    "FormData": "readonly",
+    "URL": "readonly",
+    "URLSearchParams": "readonly",
+    "WebSocket": "readonly",
+    "ReadableStream": "readonly",
+    "WritableStream": "readonly",
+    "TransformStream": "readonly",
+    "Blob": "readonly",
+    "File": "readonly",
+    "crypto": "readonly",
+    "ExecutionContext": "readonly",
+    "DurableObject": "readonly",
+    "DurableObjectState": "readonly",
+    "DurableObjectNamespace": "readonly",
+    "DurableObjectId": "readonly",
+    "DurableObjectStorage": "readonly",
+    "KVNamespace": "readonly"
+  },
+  "rules": {
+    "eqeqeq": "warn",
+    "no-alert": "off",
+    "no-eval": "error",
+    "no-var": "error",
+    "prefer-const": "warn",
+    "prefer-template": "warn",
+    "react/no-children-prop": "off",
+    "react/incompatible-library": "off",
+    "react/set-state-in-effect": "off",
+    "jsx-a11y/media-has-caption": "off",
+    "no-unused-vars": [
+      "warn",
+      {
+        "argsIgnorePattern": "^_",
+        "varsIgnorePattern": "^_"
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["**/src/components/ui/**"],
+      "rules": {
+        "jsx-a11y/prefer-tag-over-role": "off",
+        "jsx-a11y/label-has-associated-control": "off",
+        "jsx-a11y/click-events-have-key-events": "off",
+        "jsx-a11y/no-static-element-interactions": "off",
+        "jsx-a11y/no-noninteractive-element-interactions": "off",
+        "jsx-a11y/anchor-has-content": "off"
+      }
+    },
+    {
+      "files": ["**/*.test.ts", "**/*.test.tsx", "**/test/**", "**/tests/**"],
+      "rules": {
+        "vitest/no-standalone-expect": "off",
+        "vitest/require-mock-type-parameters": "off",
+        "vitest/no-conditional-expect": "off"
+      }
+    }
+  ],
+  "ignorePatterns": [
+    "dist/**",
+    ".wrangler/**",
+    "node_modules/**"
+  ]
+}

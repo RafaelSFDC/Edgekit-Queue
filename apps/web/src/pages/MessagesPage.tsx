@@ -4,7 +4,7 @@ import { PageHeader } from '../components/layout/PageHeader';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Card, CardHeader, CardContent } from '@/components/ui/card';
 import {
   Table,
   TableHeader,
@@ -24,20 +24,18 @@ import { PublishMessageDialog } from '../components/queue/PublishMessageDialog';
 import { MessageDetailsDialog } from '../components/queue/MessageDetailsDialog';
 import type { QueueMessage } from '../types';
 import {
-  Layers,
   Send,
   Trash2,
   Search,
   Clock,
   Eye,
   CheckCircle2,
-  AlertTriangle,
 } from 'lucide-react';
 
 export const MessagesPage: React.FC = () => {
   const { t } = useI18n();
   const { currentGroup } = useGroup();
-  const { data: messages = [], isLoading, refetch } = useMessagesQuery(currentGroup);
+  const { data: messages = [], isLoading, refetch: _refetch } = useMessagesQuery(currentGroup);
   const deleteMutation = useDeleteMessageMutation(currentGroup);
   const purgeMutation = usePurgeMessagesMutation(currentGroup);
 
@@ -45,9 +43,9 @@ export const MessagesPage: React.FC = () => {
   const [selectedMessage, setSelectedMessage] = useState<QueueMessage | null>(null);
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'scheduled' | 'ready'>('all');
+  const [now] = useState(() => Date.now());
 
   const filteredMessages = useMemo(() => {
-    const now = Date.now();
     return messages.filter((msg) => {
       const isScheduled = msg.visibility_at > now;
       if (filter === 'scheduled' && !isScheduled) return false;
@@ -60,7 +58,7 @@ export const MessagesPage: React.FC = () => {
         msg.url.toLowerCase().includes(term)
       );
     });
-  }, [messages, filter, search]);
+  }, [messages, filter, search, now]);
 
   const handlePurge = () => {
     if (window.confirm(t.messages.purgeConfirm)) {
@@ -179,7 +177,6 @@ export const MessagesPage: React.FC = () => {
                 </TableHeader>
                 <TableBody>
                   {filteredMessages.map((msg) => {
-                    const now = Date.now();
                     const isScheduled = msg.visibility_at > now;
                     const diffSeconds = Math.max(0, Math.round((msg.visibility_at - now) / 1000));
 

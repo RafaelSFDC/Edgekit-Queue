@@ -4,9 +4,9 @@ import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 
 const SIDEBAR_COOKIE_NAME = "sidebar_state"
-const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
+const _SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 const SIDEBAR_WIDTH = "16rem"
-const SIDEBAR_WIDTH_MOBILE = "18rem"
+const _SIDEBAR_WIDTH_MOBILE = "18rem"
 const SIDEBAR_WIDTH_ICON = "3.25rem"
 const SIDEBAR_KEYBOARD_SHORTCUT = "b"
 
@@ -362,7 +362,7 @@ interface SidebarMenuButtonProps extends React.ComponentProps<"button"> {
 const SidebarMenuButton = React.forwardRef<
   HTMLButtonElement,
   SidebarMenuButtonProps
->(({ asChild = false, isActive = false, tooltip, className, children, ...props }, ref) => {
+>(({ asChild = false, isActive = false, tooltip: _tooltip, className, children, ...props }, ref) => {
   const buttonClasses = cn(
     "peer/menu-button flex w-full items-center gap-2.5 overflow-hidden rounded-md px-2.5 py-1.5 text-left text-xs sm:text-[13px] font-medium transition-colors outline-hidden select-none",
     "text-muted-foreground hover:bg-muted/80 hover:text-foreground",

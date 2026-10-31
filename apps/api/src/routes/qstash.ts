@@ -117,7 +117,7 @@ qstashRouter.post('/publish', async (c) => {
   const method = (query.method || body?.method || c.req.header('upstash-method') || 'POST').toUpperCase();
   const forwardHeaders = {
     ...extractForwardHeaders(c.req.raw.headers),
-    ...(body?.headers || {}),
+    ...body?.headers,
   };
 
   const publishOptions: PublishOptions = {

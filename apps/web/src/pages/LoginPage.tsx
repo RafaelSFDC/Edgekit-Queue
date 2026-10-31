@@ -145,11 +145,11 @@ export const LoginPage: React.FC = () => {
                     onChange={(e) => setApiKey(e.target.value)}
                     placeholder="stash_secret_key"
                     className="pr-9 font-mono text-xs"
-                    autoFocus
                     required
                   />
                   <button
                     type="button"
+                    aria-label="Alternar visibilidade da chave"
                     onClick={() => setShowPassword(!showPassword)}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
                   >

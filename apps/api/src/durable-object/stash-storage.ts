@@ -905,7 +905,7 @@ export class StashStorage extends DurableObject {
    */
   async kvKeys(pattern: string = '*'): Promise<string[]> {
     await this.cleanupExpiredKV();
-    let sqlPattern = pattern.replace(/\*/g, '%').replace(/\?/g, '_');
+    const sqlPattern = pattern.replace(/\*/g, '%').replace(/\?/g, '_');
     const result = await this.ctx.storage.sql.exec(
       `SELECT key FROM kv_store WHERE key LIKE ? ORDER BY key ASC LIMIT 500`,
       sqlPattern

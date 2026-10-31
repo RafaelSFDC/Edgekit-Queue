@@ -7,7 +7,7 @@ export interface PageLayoutProps extends React.ComponentProps<'div'> {
 }
 
 export const PageLayout: React.FC<PageLayoutProps> = ({
-  maxWidth = 'full',
+  maxWidth: _maxWidth = 'full',
   className,
   children,
   ...props

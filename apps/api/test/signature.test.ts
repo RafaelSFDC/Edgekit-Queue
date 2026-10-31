@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest';
 import {
   generateQStashSignature,
   verifyQStashSignature,
-  calculateBodyHash,
 } from '../src/utils/signature.js';
 
 describe('Upstash QStash Signature (HMAC-SHA256)', () => {

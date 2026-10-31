@@ -15,7 +15,7 @@ function createMockDOState() {
     blockConcurrencyWhile: async (fn: () => Promise<void>) => {
       await fn();
     },
-    waitUntil: (p: Promise<any>) => {},
+    waitUntil: (_p: Promise<any>) => {},
     storage: {
       setAlarm: async (t: number) => {
         alarmTime = t;

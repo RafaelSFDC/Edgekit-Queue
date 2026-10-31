@@ -3,7 +3,7 @@ import { PageLayout } from '../components/layout/PageLayout';
 import { PageHeader } from '../components/layout/PageHeader';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Card, CardHeader, CardContent } from '@/components/ui/card';
 import {
   Table,
   TableHeader,
@@ -23,7 +23,6 @@ import {
 import { MessageDetailsDialog } from '../components/queue/MessageDetailsDialog';
 import type { DLQMessage } from '../types';
 import {
-  AlertOctagon,
   RotateCcw,
   Trash2,
   Search,

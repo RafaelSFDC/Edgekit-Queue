@@ -90,6 +90,13 @@
   --sidebar-accent-foreground: #0f172a;
   --sidebar-border: #e2e8f0;
   --sidebar-ring: #db2777;
+
+  /* Edgekit Ecosystem Module Colors */
+  --edgekit-platform: #F38020;
+  --edgekit-auth: #6366F1;
+  --edgekit-storage: #10B981;
+  --edgekit-queue: #EC4899;
+  --edgekit-events: #0EA5E9;
 }
 
 .dark {
@@ -128,6 +135,13 @@
   --sidebar-accent-foreground: #fafafa;
   --sidebar-border: #27272a;
   --sidebar-ring: #ec4899;
+
+  /* Edgekit Ecosystem Module Colors */
+  --edgekit-platform: #F38020;
+  --edgekit-auth: #6366F1;
+  --edgekit-storage: #10B981;
+  --edgekit-queue: #EC4899;
+  --edgekit-events: #0EA5E9;
 }
 
 @layer base {

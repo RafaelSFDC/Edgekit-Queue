@@ -24,6 +24,25 @@ export const SnippetsPage: React.FC = () => {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
+  // Zero-Dependency Client Snippet
+  const zeroDepTs = `import { EdgeKitQueue, verifyWebhookSignature } from "@/lib/queue"; // Copie snippets/queue.ts
+
+const queue = new EdgeKitQueue({
+  baseUrl: "${baseUrl}",
+  apiKey: "${apiKey}",
+});
+
+// 1. Publicar tarefa com atraso e retentativas (sem dependências externas)
+const res = await queue.publish({
+  url: "https://meusite.com/api/webhook",
+  payload: { event: "order.created", orderId: "ord_123" },
+  delay: "10s",
+  retries: 3,
+  dedupId: "order_ord_123",
+});
+
+console.log("Job agendado:", res.messageId);`;
+
   // QStash Snippets
   const qstashTs = `import { Client } from "@upstash/qstash";
 
@@ -130,7 +149,42 @@ print("Valor obtido:", val)`;
 
         {/* QStash Tab */}
         <TabsContent value="qstash" className="space-y-4">
-          {/* TypeScript */}
+          {/* Zero-Dependency Snippet (snippets/queue.ts) */}
+          <Card className="border-pink-500/30 bg-pink-500/5">
+            <CardHeader className="flex flex-row items-center justify-between pb-3">
+              <div>
+                <div className="flex items-center gap-2">
+                  <CardTitle className="text-sm font-semibold">Zero-Dependency TypeScript Client</CardTitle>
+                  <span className="text-[10px] font-medium bg-pink-500/20 text-pink-500 px-1.5 py-0.5 rounded border border-pink-500/30">
+                    Recomendado (shadcn style)
+                  </span>
+                </div>
+                <CardDescription className="text-xs mt-1">
+                  Copie <code>snippets/queue.ts</code> para seu app. 100% nativo com Fetch e Web Crypto.
+                </CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs gap-1.5"
+                onClick={() => handleCopy(zeroDepTs, 'zero-dep-ts')}
+              >
+                {copiedId === 'zero-dep-ts' ? (
+                  <Check className="size-3.5 text-emerald-500" />
+                ) : (
+                  <Copy className="size-3.5" />
+                )}
+                <span>{copiedId === 'zero-dep-ts' ? t.common.copied : t.snippets.copyCode}</span>
+              </Button>
+            </CardHeader>
+            <CardContent>
+              <pre className="p-4 bg-muted/80 border border-border rounded-lg font-mono text-xs overflow-x-auto text-foreground">
+                {zeroDepTs}
+              </pre>
+            </CardContent>
+          </Card>
+
+          {/* TypeScript (Upstash SDK) */}
           <Card className="border-border">
             <CardHeader className="flex flex-row items-center justify-between pb-3">
               <div>

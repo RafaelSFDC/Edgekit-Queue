@@ -27,6 +27,7 @@ export const PublishMessageDialog: React.FC<PublishMessageDialogProps> = ({
   const [payload, setPayload] = useState('{\n  "event": "user.signup",\n  "userId": 123\n}');
   const [delay, setDelay] = useState('');
   const [retries, setRetries] = useState('3');
+  const [priority, setPriority] = useState<number>(0);
   const [method, _setMethod] = useState('POST');
 
   const publishMutation = usePublishMessageMutation();
@@ -45,6 +46,7 @@ export const PublishMessageDialog: React.FC<PublishMessageDialogProps> = ({
       payload: parsedPayload,
       delay: delay.trim() || undefined,
       retries: retries ? parseInt(retries, 10) : undefined,
+      priority,
       method,
     });
 
@@ -103,6 +105,39 @@ export const PublishMessageDialog: React.FC<PublishMessageDialogProps> = ({
                 value={retries}
                 onChange={(e) => setRetries(e.target.value)}
               />
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label>Prioridade de Processamento</Label>
+            <div className="grid grid-cols-3 gap-2">
+              <Button
+                type="button"
+                variant={priority === 0 ? 'default' : 'outline'}
+                size="sm"
+                className={`text-xs h-8 ${priority === 0 ? 'bg-zinc-700 hover:bg-zinc-600' : ''}`}
+                onClick={() => setPriority(0)}
+              >
+                Normal (0)
+              </Button>
+              <Button
+                type="button"
+                variant={priority === 5 ? 'default' : 'outline'}
+                size="sm"
+                className={`text-xs h-8 ${priority === 5 ? 'bg-amber-600 hover:bg-amber-700 text-white' : ''}`}
+                onClick={() => setPriority(5)}
+              >
+                Alta (5)
+              </Button>
+              <Button
+                type="button"
+                variant={priority === 10 ? 'default' : 'outline'}
+                size="sm"
+                className={`text-xs h-8 ${priority === 10 ? 'bg-rose-600 hover:bg-rose-700 text-white' : ''}`}
+                onClick={() => setPriority(10)}
+              >
+                Urgente (10)
+              </Button>
             </div>
           </div>
 

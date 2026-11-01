@@ -109,6 +109,7 @@ class EdgeKitQueue:
         payload: Any = None,
         delay: Optional[Union[str, int]] = None,
         retries: Optional[int] = None,
+        priority: Optional[int] = None,
         group_id: Optional[str] = None,
         callback_url: Optional[str] = None,
         dedup_id: Optional[str] = None,
@@ -129,6 +130,8 @@ class EdgeKitQueue:
             req_headers["Upstash-Delay"] = str(delay)
         if retries is not None:
             req_headers["Upstash-Retries"] = str(retries)
+        if priority is not None:
+            req_headers["Upstash-Priority"] = str(priority)
         if callback_url:
             req_headers["Upstash-Callback"] = callback_url
         if dedup_id:
@@ -143,6 +146,7 @@ class EdgeKitQueue:
         body = {
             "url": url,
             "payload": payload,
+            "priority": priority,
         }
 
         return self._request("POST", "/publish", headers=req_headers, json=body)
@@ -157,6 +161,70 @@ class EdgeKitQueue:
             body=body,
             signing_key=signing_key or self.api_key,
         )
+
+    # --------------------------------------------------------------------------
+    # Recurring Cron Schedules
+    # --------------------------------------------------------------------------
+
+    def create_schedule(
+        self,
+        cron: str,
+        url: str,
+        payload: Any = None,
+        priority: int = 0,
+        group_id: Optional[str] = None,
+        callback_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        g = group_id or self.default_group_id
+        body = {
+            "cron": cron,
+            "url": url,
+            "payload": payload,
+            "priority": priority,
+            "groupId": g,
+            "callbackUrl": callback_url,
+        }
+        return self._request("POST", "/api/v1/schedules", json=body)
+
+    def list_schedules(self, group_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        g = group_id or self.default_group_id
+        data = self._request("GET", f"/api/v1/schedules?groupId={g}")
+        return data.get("schedules", [])
+
+    def delete_schedule(self, schedule_id: str, group_id: Optional[str] = None) -> bool:
+        g = group_id or self.default_group_id
+        data = self._request("DELETE", f"/api/v1/schedules/{schedule_id}?groupId={g}")
+        return data.get("success", False)
+
+    def pause_schedule(self, schedule_id: str, group_id: Optional[str] = None) -> bool:
+        g = group_id or self.default_group_id
+        data = self._request("POST", f"/api/v1/schedules/{schedule_id}/pause?groupId={g}")
+        return data.get("success", False)
+
+    def resume_schedule(self, schedule_id: str, group_id: Optional[str] = None) -> bool:
+        g = group_id or self.default_group_id
+        data = self._request("POST", f"/api/v1/schedules/{schedule_id}/resume?groupId={g}")
+        return data.get("success", False)
+
+    def trigger_schedule(self, schedule_id: str, group_id: Optional[str] = None) -> Dict[str, Any]:
+        g = group_id or self.default_group_id
+        return self._request("POST", f"/api/v1/schedules/{schedule_id}/trigger?groupId={g}")
+
+    # --------------------------------------------------------------------------
+    # Queue Settings & DLQ Alerts
+    # --------------------------------------------------------------------------
+
+    def get_settings(self, group_id: Optional[str] = None) -> Dict[str, Any]:
+        g = group_id or self.default_group_id
+        return self._request("GET", f"/api/v1/settings?groupId={g}")
+
+    def update_settings(self, settings: Dict[str, Any], group_id: Optional[str] = None) -> Dict[str, Any]:
+        g = group_id or self.default_group_id
+        return self._request("POST", "/api/v1/settings", json={"groupId": g, **settings})
+
+    def test_dlq_alert(self, dlq_alert_url: str, group_id: Optional[str] = None) -> Dict[str, Any]:
+        g = group_id or self.default_group_id
+        return self._request("POST", "/api/v1/settings/test-alert", json={"groupId": g, "dlqAlertUrl": dlq_alert_url})
 
     # --------------------------------------------------------------------------
     # Queue Management

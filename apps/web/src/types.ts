@@ -13,6 +13,7 @@ export interface QueueMessage {
   last_error: string | null;
   callback_url: string | null;
   dedup_id: string | null;
+  priority: number;
 }
 
 export interface DLQMessage {
@@ -24,6 +25,8 @@ export interface DLQMessage {
   failed_at: number;
   retries: number;
   error_reason: string;
+  callback_url?: string | null;
+  priority: number;
 }
 
 export interface DeliveryLog {
@@ -58,6 +61,7 @@ export interface ClusterStats {
   processing: number;
   dlq: number;
   kvKeysCount: number;
+  schedulesCount?: number;
   deliveryCount?: number;
 }
 
@@ -71,4 +75,29 @@ export interface PublishRequest {
   method?: string;
   dedupId?: string;
   callbackUrl?: string;
+  priority?: number;
+}
+
+export interface Schedule {
+  id: string;
+  group_id: string;
+  cron: string;
+  url: string;
+  payload: string;
+  headers: string;
+  method: string;
+  created_at: number;
+  next_run_at: number;
+  last_run_at: number | null;
+  is_paused: number;
+  retries: number;
+  callback_url: string | null;
+  priority: number;
+}
+
+export interface QueueSettings {
+  group_id: string;
+  max_concurrent_deliveries: number;
+  rate_limit_per_second: number;
+  dlq_alert_url: string | null;
 }

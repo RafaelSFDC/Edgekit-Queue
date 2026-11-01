@@ -11,6 +11,7 @@ export interface Env {
   TOTAL_RETRIES_BEFORE_DLQ?: number | string;
   MAX_CONCURRENT_DELIVERIES?: number | string;
   ALLOWED_ORIGINS?: string;
+  DLQ_ALERT_URL?: string;
 }
 
 export const MESSAGE_STATUS = {
@@ -35,6 +36,7 @@ export interface QueueMessage {
   last_error: string | null;
   callback_url: string | null;
   dedup_id: string | null;
+  priority: number;
 }
 
 export interface DLQMessage {
@@ -46,6 +48,8 @@ export interface DLQMessage {
   failed_at: number;
   retries: number;
   error_reason: string;
+  callback_url?: string | null;
+  priority: number;
 }
 
 export interface DeliveryLog {
@@ -73,6 +77,7 @@ export interface PublishOptions {
   callbackUrl?: string;
   dedupId?: string;
   dedupWindowSeconds?: number;
+  priority?: number; // e.g. 0 (normal), 5 (high), 10 (urgent)
 }
 
 export interface PublishResult {
@@ -82,6 +87,43 @@ export interface PublishResult {
   visibilityAt: number;
   delayMs: number;
   deduplicated?: boolean;
+  priority: number;
+}
+
+export interface Schedule {
+  id: string;
+  group_id: string;
+  cron: string;
+  url: string;
+  payload: string;
+  headers: string;
+  method: string;
+  created_at: number;
+  next_run_at: number;
+  last_run_at: number | null;
+  is_paused: number; // 0: active, 1: paused
+  retries: number;
+  callback_url: string | null;
+  priority: number;
+}
+
+export interface CreateScheduleOptions {
+  cron: string;
+  url: string;
+  payload?: any;
+  groupId?: string;
+  headers?: Record<string, string>;
+  method?: string;
+  retries?: number;
+  callbackUrl?: string;
+  priority?: number;
+}
+
+export interface QueueSettings {
+  group_id: string;
+  max_concurrent_deliveries: number;
+  rate_limit_per_second: number;
+  dlq_alert_url: string | null;
 }
 
 export interface QueueStats {
@@ -91,5 +133,6 @@ export interface QueueStats {
   processing: number;
   dlq: number;
   kvKeysCount: number;
+  schedulesCount?: number;
   deliveryCount?: number;
 }

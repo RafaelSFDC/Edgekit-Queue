@@ -1,4 +1,13 @@
-import type { ClusterStats, QueueMessage, DLQMessage, RedisKVItem, PublishRequest, DeliveryLog } from '../types';
+import type {
+  ClusterStats,
+  QueueMessage,
+  DLQMessage,
+  RedisKVItem,
+  PublishRequest,
+  DeliveryLog,
+  Schedule,
+  QueueSettings,
+} from '../types';
 
 export class ApiError extends Error {
   status: number;
@@ -401,4 +410,151 @@ export async function flushRedis(groupId: string = 'default'): Promise<void> {
   if (!res.ok) {
     throw new ApiError('Falha ao limpar banco de dados Redis.', res.status);
   }
+}
+
+// -----------------------------------------------------------------------------
+// Schedules API
+// -----------------------------------------------------------------------------
+
+export async function fetchSchedules(groupId: string = 'default'): Promise<Schedule[]> {
+  const res = await fetch(`${API_BASE}/api/v1/schedules?groupId=${encodeURIComponent(groupId)}`, {
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao carregar agendamentos cron.', res.status);
+  }
+
+  const data = await res.json();
+  return data.schedules || [];
+}
+
+export async function createSchedule(data: {
+  cron: string;
+  url: string;
+  payload?: any;
+  groupId?: string;
+  priority?: number;
+}): Promise<Schedule> {
+  const res = await fetch(`${API_BASE}/api/v1/schedules`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+    body: JSON.stringify(data),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Falha ao criar agendamento cron.' }));
+    throw new ApiError(err.error || 'Falha ao criar agendamento cron.', res.status);
+  }
+
+  return res.json();
+}
+
+export async function deleteSchedule(id: string, groupId: string = 'default'): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/api/v1/schedules/${encodeURIComponent(id)}?groupId=${encodeURIComponent(groupId)}`, {
+    method: 'DELETE',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao excluir agendamento.', res.status);
+  }
+
+  const data = await res.json();
+  return data.success;
+}
+
+export async function pauseSchedule(id: string, groupId: string = 'default'): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/api/v1/schedules/${encodeURIComponent(id)}/pause?groupId=${encodeURIComponent(groupId)}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao pausar agendamento.', res.status);
+  }
+
+  const data = await res.json();
+  return data.success;
+}
+
+export async function resumeSchedule(id: string, groupId: string = 'default'): Promise<boolean> {
+  const res = await fetch(`${API_BASE}/api/v1/schedules/${encodeURIComponent(id)}/resume?groupId=${encodeURIComponent(groupId)}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao retomar agendamento.', res.status);
+  }
+
+  const data = await res.json();
+  return data.success;
+}
+
+export async function triggerScheduleNow(id: string, groupId: string = 'default'): Promise<{ success: boolean; messageId?: string }> {
+  const res = await fetch(`${API_BASE}/api/v1/schedules/${encodeURIComponent(id)}/trigger?groupId=${encodeURIComponent(groupId)}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao disparar agendamento.', res.status);
+  }
+
+  return res.json();
+}
+
+// -----------------------------------------------------------------------------
+// Settings API
+// -----------------------------------------------------------------------------
+
+export async function fetchQueueSettings(groupId: string = 'default'): Promise<QueueSettings> {
+  const res = await fetch(`${API_BASE}/api/v1/settings?groupId=${encodeURIComponent(groupId)}`, {
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao carregar configurações da fila.', res.status);
+  }
+
+  return res.json();
+}
+
+export async function updateQueueSettings(settings: Partial<QueueSettings>, groupId: string = 'default'): Promise<QueueSettings> {
+  const res = await fetch(`${API_BASE}/api/v1/settings?groupId=${encodeURIComponent(groupId)}`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ ...settings, groupId }),
+  });
+
+  if (!res.ok) {
+    throw new ApiError('Falha ao salvar configurações da fila.', res.status);
+  }
+
+  return res.json();
+}
+
+export async function testDlqAlert(dlqAlertUrl: string, groupId: string = 'default'): Promise<{ success: boolean; error?: string }> {
+  const res = await fetch(`${API_BASE}/api/v1/settings/test-alert`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ dlqAlertUrl, groupId }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: 'Falha ao testar webhook de alerta.' }));
+    throw new ApiError(err.error || 'Falha ao testar webhook de alerta.', res.status);
+  }
+
+  return res.json();
 }

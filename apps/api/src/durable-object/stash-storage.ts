@@ -7,10 +7,14 @@ import type {
   PublishOptions,
   PublishResult,
   QueueStats,
+  Schedule,
+  CreateScheduleOptions,
+  QueueSettings,
 } from '../types.js';
 import { MESSAGE_STATUS } from '../types.js';
 import { parseDelay } from '../utils/delay.js';
 import { generateQStashSignature } from '../utils/signature.js';
+import { computeNextCron, isValidCron } from '../utils/cron.js';
 
 export class StashStorage extends DurableObject {
   private envConfig: Env;
@@ -136,7 +140,50 @@ export class StashStorage extends DurableObject {
       );
 
       CREATE INDEX IF NOT EXISTS idx_list_key ON redis_list(key, id);
+
+      -- Recurring Cron Schedules
+      CREATE TABLE IF NOT EXISTS schedules (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        cron TEXT NOT NULL,
+        url TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        headers TEXT NOT NULL,
+        method TEXT DEFAULT 'POST',
+        created_at INTEGER NOT NULL,
+        next_run_at INTEGER NOT NULL,
+        last_run_at INTEGER,
+        is_paused INTEGER DEFAULT 0,
+        retries INTEGER DEFAULT 3,
+        callback_url TEXT,
+        priority INTEGER DEFAULT 0
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_schedules_next_run ON schedules(is_paused, next_run_at);
+
+      -- Per-group queue settings (concurrency, rate limiting, and DLQ alert webhook)
+      CREATE TABLE IF NOT EXISTS queue_settings (
+        group_id TEXT PRIMARY KEY,
+        max_concurrent_deliveries INTEGER DEFAULT 10,
+        rate_limit_per_second INTEGER DEFAULT 0,
+        dlq_alert_url TEXT
+      );
     `);
+
+    // Column migrations for existing tables
+    try {
+      const qCols = (await this.ctx.storage.sql.exec(`PRAGMA table_info(queue)`)).toArray() as any[];
+      if (!qCols.some((c) => c.name === 'priority')) {
+        await this.ctx.storage.sql.exec(`ALTER TABLE queue ADD COLUMN priority INTEGER DEFAULT 0`);
+      }
+    } catch {}
+
+    try {
+      const dlqCols = (await this.ctx.storage.sql.exec(`PRAGMA table_info(queue_dlq)`)).toArray() as any[];
+      if (!dlqCols.some((c) => c.name === 'priority')) {
+        await this.ctx.storage.sql.exec(`ALTER TABLE queue_dlq ADD COLUMN priority INTEGER DEFAULT 0`);
+      }
+    } catch {}
   }
 
   // =========================================================================
@@ -214,6 +261,7 @@ export class StashStorage extends DurableObject {
           visibilityAt,
           delayMs: delayParsed.delayMs,
           deduplicated: true,
+          priority: Number(options.priority) || 0,
         };
       }
 
@@ -235,11 +283,13 @@ export class StashStorage extends DurableObject {
 
     const headersStr = JSON.stringify(options.headers ?? {});
 
+    const priority = Math.max(0, Math.min(100, Number(options.priority) || 0));
+
     await this.ctx.storage.sql.exec(
       `INSERT INTO queue (
         id, group_id, url, payload, headers, method, created_at,
-        visibility_at, status, retries, max_retries, callback_url, dedup_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        visibility_at, status, retries, max_retries, callback_url, dedup_id, priority
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       messageId,
       groupId,
       options.url,
@@ -252,7 +302,8 @@ export class StashStorage extends DurableObject {
       0,
       maxRetries,
       options.callbackUrl || null,
-      options.dedupId || null
+      options.dedupId || null,
+      priority
     );
 
     // Schedule DO alarm or trigger immediate delivery
@@ -270,6 +321,7 @@ export class StashStorage extends DurableObject {
       visibilityAt,
       delayMs: delayParsed.delayMs,
       deduplicated: false,
+      priority,
     };
   }
 
@@ -278,20 +330,38 @@ export class StashStorage extends DurableObject {
    */
   async consumeQueue(batchSizeLimit?: number): Promise<{ processed: number; succeeded: number; failed: number }> {
     const now = Date.now();
-    const maxLimit = batchSizeLimit || Number(this.envConfig.MAX_CONCURRENT_DELIVERIES) || 10;
 
-    // Atomically select and lock pending messages that are ready for delivery
+    // Check concurrency limits
+    const settings = await this.getQueueSettings('default');
+    const maxConcurrency = settings.max_concurrent_deliveries || Number(this.envConfig.MAX_CONCURRENT_DELIVERIES) || 10;
+
+    // Count currently processing messages
+    const activeResult = await this.ctx.storage.sql.exec(
+      `SELECT count(id) as count FROM queue WHERE status = ?`,
+      MESSAGE_STATUS.PROCESSING
+    );
+    const activeCount = Number(activeResult.toArray()[0]?.count) || 0;
+    const availableSlots = Math.max(0, maxConcurrency - activeCount);
+
+    if (availableSlots <= 0) {
+      await this.scheduleNextPendingAlarm();
+      return { processed: 0, succeeded: 0, failed: 0 };
+    }
+
+    const maxLimit = Math.min(batchSizeLimit || maxConcurrency, availableSlots);
+
+    // Atomically select and lock pending messages by Priority DESC, created_at ASC
     const result = await this.ctx.storage.sql.exec(
       `UPDATE queue
        SET status = ?
        WHERE id IN (
          SELECT id FROM queue
          WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?)
-         ORDER BY created_at ASC
+         ORDER BY priority DESC, created_at ASC
          LIMIT ?
        )
        RETURNING id, group_id, url, payload, headers, method, created_at,
-                 visibility_at, status, retries, max_retries, last_error, callback_url, dedup_id`,
+                 visibility_at, status, retries, max_retries, last_error, callback_url, dedup_id, priority`,
       MESSAGE_STATUS.PROCESSING,
       MESSAGE_STATUS.PENDING,
       now,
@@ -440,8 +510,8 @@ export class StashStorage extends DurableObject {
         // Move to DLQ
         await this.ctx.storage.sql.exec(
           `INSERT INTO queue_dlq (
-            id, group_id, url, payload, headers, method, failed_at, retries, error_reason, callback_url
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            id, group_id, url, payload, headers, method, failed_at, retries, error_reason, callback_url, priority
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           msg.id,
           msg.group_id,
           msg.url,
@@ -451,10 +521,14 @@ export class StashStorage extends DurableObject {
           Date.now(),
           nextRetries,
           errorDetail,
-          msg.callback_url
+          msg.callback_url,
+          msg.priority || 0
         );
 
         await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE id = ?`, msg.id);
+
+        // Dispatch automatic DLQ alert webhook (Discord, Slack, or custom URL)
+        this.ctx.waitUntil(this.dispatchDlqAlert(msg, errorDetail, nextRetries));
 
         if (msg.callback_url) {
           this.ctx.waitUntil(this.sendCallback(msg.callback_url, {
@@ -514,11 +588,12 @@ export class StashStorage extends DurableObject {
    */
   async alarm(): Promise<void> {
     await this.cleanupExpiredKV();
+    await this.triggerDueSchedules();
     await this.consumeQueue();
   }
 
   /**
-   * Schedule DO alarm for the earliest scheduled message
+   * Schedule DO alarm for the earliest scheduled message or cron run
    */
   private async scheduleEarliestAlarm(targetTime: number): Promise<void> {
     const currentAlarm = await this.ctx.storage.getAlarm();
@@ -528,20 +603,43 @@ export class StashStorage extends DurableObject {
   }
 
   /**
-   * Inspect queue for the next scheduled message and set alarm accordingly
+   * Inspect queue and schedules for the next pending execution and set alarm accordingly
    */
   private async scheduleNextPendingAlarm(): Promise<void> {
-    const result = await this.ctx.storage.sql.exec(
+    const now = Date.now();
+
+    // 1. Next pending message
+    const msgResult = await this.ctx.storage.sql.exec(
       `SELECT MIN(visibility_at) as next_run
        FROM queue
        WHERE status = ? AND visibility_at > ?`,
       MESSAGE_STATUS.PENDING,
-      Date.now()
+      now
     );
+    const msgRow = msgResult.toArray()[0] as any;
+    const nextMsgRun = msgRow?.next_run && Number(msgRow.next_run) > now ? Number(msgRow.next_run) : null;
 
-    const row = result.toArray()[0];
-    if (row && row.next_run && Number(row.next_run) > Date.now()) {
-      await this.ctx.storage.setAlarm(Number(row.next_run));
+    // 2. Next active schedule
+    const schedResult = await this.ctx.storage.sql.exec(
+      `SELECT MIN(next_run_at) as next_run
+       FROM schedules
+       WHERE is_paused = 0 AND next_run_at > ?`,
+      now
+    );
+    const schedRow = schedResult.toArray()[0] as any;
+    const nextSchedRun = schedRow?.next_run && Number(schedRow.next_run) > now ? Number(schedRow.next_run) : null;
+
+    let earliest: number | null = null;
+    if (nextMsgRun && nextSchedRun) {
+      earliest = Math.min(nextMsgRun, nextSchedRun);
+    } else if (nextMsgRun) {
+      earliest = nextMsgRun;
+    } else if (nextSchedRun) {
+      earliest = nextSchedRun;
+    }
+
+    if (earliest) {
+      await this.ctx.storage.setAlarm(earliest);
     }
   }
 
@@ -587,6 +685,11 @@ export class StashStorage extends DurableObject {
       group
     );
 
+    const schedulesQuery = await this.ctx.storage.sql.exec(
+      `SELECT count(id) as count FROM schedules WHERE group_id = ? AND is_paused = 0`,
+      group
+    );
+
     return {
       group_id: group,
       pending: Number(pendingQuery.toArray()[0]?.count) || 0,
@@ -595,6 +698,7 @@ export class StashStorage extends DurableObject {
       dlq: Number(dlqQuery.toArray()[0]?.count) || 0,
       kvKeysCount: Number(kvCountQuery.toArray()[0]?.count) || 0,
       deliveryCount: Number(deliveryCountQuery.toArray()[0]?.count) || 0,
+      schedulesCount: Number(schedulesQuery.toArray()[0]?.count) || 0,
     };
   }
 
@@ -604,7 +708,7 @@ export class StashStorage extends DurableObject {
   async getMessages(groupId: string, limit: number = 20, offset: number = 0): Promise<QueueMessage[]> {
     const result = await this.ctx.storage.sql.exec(
       `SELECT id, group_id, url, payload, headers, method, created_at,
-              visibility_at, status, retries, max_retries, last_error, callback_url, dedup_id
+              visibility_at, status, retries, max_retries, last_error, callback_url, dedup_id, priority
        FROM queue
        WHERE group_id = ?
        ORDER BY created_at DESC
@@ -622,7 +726,7 @@ export class StashStorage extends DurableObject {
    */
   async getDLQMessages(groupId: string, limit: number = 20, offset: number = 0): Promise<DLQMessage[]> {
     const result = await this.ctx.storage.sql.exec(
-      `SELECT id, group_id, url, payload, headers, method, failed_at, retries, error_reason, callback_url
+      `SELECT id, group_id, url, payload, headers, method, failed_at, retries, error_reason, callback_url, priority
        FROM queue_dlq
        WHERE group_id = ?
        ORDER BY failed_at DESC
@@ -666,10 +770,10 @@ export class StashStorage extends DurableObject {
    */
   async retryDLQMessage(id: string): Promise<boolean> {
     const check = await this.ctx.storage.sql.exec(
-      `SELECT id, group_id, url, payload, headers, method, callback_url FROM queue_dlq WHERE id = ?`,
+      `SELECT id, group_id, url, payload, headers, method, callback_url, priority FROM queue_dlq WHERE id = ?`,
       id
     );
-    const row = check.toArray()[0];
+    const row = check.toArray()[0] as any;
     if (!row) return false;
 
     const defaultMaxRetries = Number(this.envConfig.TOTAL_RETRIES_BEFORE_DLQ) || 3;
@@ -677,8 +781,8 @@ export class StashStorage extends DurableObject {
     await this.ctx.storage.sql.exec(
       `INSERT INTO queue (
         id, group_id, url, payload, headers, method, created_at,
-        visibility_at, status, retries, max_retries, callback_url
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        visibility_at, status, retries, max_retries, callback_url, priority
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.id,
       row.group_id,
       row.url,
@@ -690,7 +794,8 @@ export class StashStorage extends DurableObject {
       MESSAGE_STATUS.PENDING,
       0,
       defaultMaxRetries,
-      row.callback_url
+      row.callback_url,
+      row.priority || 0
     );
 
     await this.ctx.storage.sql.exec(`DELETE FROM queue_dlq WHERE id = ?`, id);
@@ -724,6 +829,339 @@ export class StashStorage extends DurableObject {
     }
     if (target === 'dlq' || target === 'all') {
       await this.ctx.storage.sql.exec(`DELETE FROM queue_dlq WHERE group_id = ?`, groupId);
+    }
+  }
+
+  // =========================================================================
+  // SCHEDULES (CRON RECURRING JOBS)
+  // =========================================================================
+
+  async createSchedule(options: CreateScheduleOptions): Promise<Schedule> {
+    if (!isValidCron(options.cron)) {
+      throw new Error(`Invalid cron expression: "${options.cron}"`);
+    }
+
+    if (!options.url || (!options.url.startsWith('http://') && !options.url.startsWith('https://'))) {
+      throw new Error('Destination URL must begin with http:// or https://');
+    }
+
+    const now = Date.now();
+    const id = `sched_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const groupId = (options.groupId || 'default').trim().toLowerCase();
+    const nextRunAt = computeNextCron(options.cron, new Date(now));
+    const retries = options.retries ?? 3;
+    const priority = Math.max(0, Math.min(100, Number(options.priority) || 0));
+
+    const payloadStr = typeof options.payload === 'string'
+      ? options.payload
+      : JSON.stringify(options.payload ?? {});
+
+    const headersStr = JSON.stringify(options.headers ?? {});
+    const method = (options.method || 'POST').toUpperCase();
+
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO schedules (
+        id, group_id, cron, url, payload, headers, method, created_at,
+        next_run_at, last_run_at, is_paused, retries, callback_url, priority
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id,
+      groupId,
+      options.cron.trim(),
+      options.url,
+      payloadStr,
+      headersStr,
+      method,
+      now,
+      nextRunAt,
+      null,
+      0,
+      retries,
+      options.callbackUrl || null,
+      priority
+    );
+
+    await this.scheduleEarliestAlarm(nextRunAt);
+
+    return {
+      id,
+      group_id: groupId,
+      cron: options.cron.trim(),
+      url: options.url,
+      payload: payloadStr,
+      headers: headersStr,
+      method,
+      created_at: now,
+      next_run_at: nextRunAt,
+      last_run_at: null,
+      is_paused: 0,
+      retries,
+      callback_url: options.callbackUrl || null,
+      priority,
+    };
+  }
+
+  async listSchedules(groupId: string = 'default'): Promise<Schedule[]> {
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT id, group_id, cron, url, payload, headers, method, created_at,
+              next_run_at, last_run_at, is_paused, retries, callback_url, priority
+       FROM schedules
+       WHERE group_id = ?
+       ORDER BY created_at DESC`,
+      groupId
+    );
+    return result.toArray() as unknown as Schedule[];
+  }
+
+  async getSchedule(id: string): Promise<Schedule | null> {
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT id, group_id, cron, url, payload, headers, method, created_at,
+              next_run_at, last_run_at, is_paused, retries, callback_url, priority
+       FROM schedules
+       WHERE id = ?`,
+      id
+    );
+    const row = result.toArray()[0];
+    return (row as unknown as Schedule) || null;
+  }
+
+  async deleteSchedule(id: string): Promise<boolean> {
+    await this.ctx.storage.sql.exec(`DELETE FROM schedules WHERE id = ?`, id);
+    return true;
+  }
+
+  async togglePauseSchedule(id: string, paused?: boolean): Promise<boolean> {
+    const current = await this.getSchedule(id);
+    if (!current) return false;
+
+    const newPaused = paused !== undefined ? (paused ? 1 : 0) : (current.is_paused === 1 ? 0 : 1);
+    let nextRun = current.next_run_at;
+
+    if (newPaused === 0 && current.next_run_at <= Date.now()) {
+      nextRun = computeNextCron(current.cron, new Date());
+    }
+
+    await this.ctx.storage.sql.exec(
+      `UPDATE schedules SET is_paused = ?, next_run_at = ? WHERE id = ?`,
+      newPaused,
+      nextRun,
+      id
+    );
+
+    if (newPaused === 0) {
+      await this.scheduleEarliestAlarm(nextRun);
+    }
+
+    return true;
+  }
+
+  async triggerScheduleNow(id: string): Promise<{ success: boolean; messageId?: string }> {
+    const sched = await this.getSchedule(id);
+    if (!sched) return { success: false };
+
+    let parsedPayload: any = sched.payload;
+    try {
+      parsedPayload = JSON.parse(sched.payload);
+    } catch {}
+
+    let parsedHeaders: Record<string, string> = {};
+    try {
+      parsedHeaders = JSON.parse(sched.headers);
+    } catch {}
+
+    const res = await this.publishMessage({
+      groupId: sched.group_id,
+      url: sched.url,
+      payload: parsedPayload,
+      headers: parsedHeaders,
+      method: sched.method,
+      retries: sched.retries,
+      callbackUrl: sched.callback_url || undefined,
+      priority: sched.priority,
+    });
+
+    await this.ctx.storage.sql.exec(
+      `UPDATE schedules SET last_run_at = ? WHERE id = ?`,
+      Date.now(),
+      id
+    );
+
+    return { success: true, messageId: res.messageId };
+  }
+
+  async triggerDueSchedules(): Promise<number> {
+    const now = Date.now();
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT id, group_id, cron, url, payload, headers, method, retries, callback_url, priority
+       FROM schedules
+       WHERE is_paused = 0 AND next_run_at <= ?`,
+      now
+    );
+
+    const due = result.toArray() as unknown as Schedule[];
+    for (const sched of due) {
+      let parsedPayload: any = sched.payload;
+      try {
+        parsedPayload = JSON.parse(sched.payload);
+      } catch {}
+
+      let parsedHeaders: Record<string, string> = {};
+      try {
+        parsedHeaders = JSON.parse(sched.headers);
+      } catch {}
+
+      await this.publishMessage({
+        groupId: sched.group_id,
+        url: sched.url,
+        payload: parsedPayload,
+        headers: parsedHeaders,
+        method: sched.method,
+        retries: sched.retries,
+        callbackUrl: sched.callback_url || undefined,
+        priority: sched.priority,
+      });
+
+      let nextRun = now + 60_000;
+      try {
+        nextRun = computeNextCron(sched.cron, new Date(now));
+      } catch (e) {
+        console.warn(`Failed to compute next cron for schedule ${sched.id}:`, e);
+      }
+
+      await this.ctx.storage.sql.exec(
+        `UPDATE schedules SET last_run_at = ?, next_run_at = ? WHERE id = ?`,
+        now,
+        nextRun,
+        sched.id
+      );
+    }
+
+    return due.length;
+  }
+
+  // =========================================================================
+  // QUEUE SETTINGS (CONCURRENCY, RATE LIMIT, DLQ ALERTS)
+  // =========================================================================
+
+  async getQueueSettings(groupId: string = 'default'): Promise<QueueSettings> {
+    const defaultConcurrency = Number(this.envConfig.MAX_CONCURRENT_DELIVERIES) || 10;
+    const defaultDlqAlert = this.envConfig.DLQ_ALERT_URL || null;
+
+    const result = await this.ctx.storage.sql.exec(
+      `SELECT group_id, max_concurrent_deliveries, rate_limit_per_second, dlq_alert_url
+       FROM queue_settings
+       WHERE group_id = ?`,
+      groupId
+    );
+
+    const row = result.toArray()[0] as any;
+    if (!row) {
+      return {
+        group_id: groupId,
+        max_concurrent_deliveries: defaultConcurrency,
+        rate_limit_per_second: 0,
+        dlq_alert_url: defaultDlqAlert,
+      };
+    }
+
+    return {
+      group_id: groupId,
+      max_concurrent_deliveries: Number(row.max_concurrent_deliveries) || defaultConcurrency,
+      rate_limit_per_second: Number(row.rate_limit_per_second) || 0,
+      dlq_alert_url: row.dlq_alert_url || defaultDlqAlert,
+    };
+  }
+
+  async updateQueueSettings(groupId: string, settings: Partial<QueueSettings>): Promise<QueueSettings> {
+    const current = await this.getQueueSettings(groupId);
+    const updated: QueueSettings = {
+      group_id: groupId,
+      max_concurrent_deliveries: settings.max_concurrent_deliveries !== undefined
+        ? Math.max(1, Math.min(100, Number(settings.max_concurrent_deliveries)))
+        : current.max_concurrent_deliveries,
+      rate_limit_per_second: settings.rate_limit_per_second !== undefined
+        ? Math.max(0, Number(settings.rate_limit_per_second))
+        : current.rate_limit_per_second,
+      dlq_alert_url: settings.dlq_alert_url !== undefined
+        ? (settings.dlq_alert_url ? String(settings.dlq_alert_url).trim() : null)
+        : current.dlq_alert_url,
+    };
+
+    await this.ctx.storage.sql.exec(
+      `INSERT INTO queue_settings (group_id, max_concurrent_deliveries, rate_limit_per_second, dlq_alert_url)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(group_id) DO UPDATE SET
+         max_concurrent_deliveries = excluded.max_concurrent_deliveries,
+         rate_limit_per_second = excluded.rate_limit_per_second,
+         dlq_alert_url = excluded.dlq_alert_url`,
+      groupId,
+      updated.max_concurrent_deliveries,
+      updated.rate_limit_per_second,
+      updated.dlq_alert_url
+    );
+
+    return updated;
+  }
+
+  async testDlqAlert(groupId: string, customAlertUrl?: string): Promise<{ success: boolean; error?: string }> {
+    const settings = await this.getQueueSettings(groupId);
+    const alertUrl = customAlertUrl || settings.dlq_alert_url || this.envConfig.DLQ_ALERT_URL;
+
+    if (!alertUrl) {
+      return { success: false, error: 'No DLQ alert URL configured' };
+    }
+
+    const payload = {
+      event: 'queue.dlq_alert_test',
+      content: `🔔 **[Edgekit Queue]** Teste de notificação de alerta da Dead Letter Queue para o grupo \`${groupId}\`. Conexão efetuada com sucesso!`,
+      text: `🔔 [Edgekit Queue] Teste de notificação de alerta da Dead Letter Queue para o grupo ${groupId}.`,
+      groupId,
+      timestamp: Date.now(),
+    };
+
+    try {
+      const res = await fetch(alertUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10000),
+      });
+
+      if (!res.ok) {
+        return { success: false, error: `HTTP ${res.status}: ${res.statusText}` };
+      }
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e?.message || 'Failed to send alert' };
+    }
+  }
+
+  private async dispatchDlqAlert(msg: QueueMessage, errorReason: string, retries: number): Promise<void> {
+    const settings = await this.getQueueSettings(msg.group_id);
+    const alertUrl = settings.dlq_alert_url || this.envConfig.DLQ_ALERT_URL;
+    if (!alertUrl) return;
+
+    const payload = {
+      event: 'queue.dlq_alert',
+      content: `⚠️ **[Edgekit Queue DLQ Alert]** Mensagem \`${msg.id}\` falhou após ${retries} tentativas e foi movida para a DLQ.\n- **URL:** ${msg.url}\n- **Grupo:** \`${msg.group_id}\`\n- **Erro:** ${errorReason}`,
+      text: `⚠️ [Edgekit Queue DLQ Alert] Mensagem ${msg.id} falhou após ${retries} tentativas: ${errorReason}`,
+      messageId: msg.id,
+      groupId: msg.group_id,
+      url: msg.url,
+      priority: msg.priority || 0,
+      retries,
+      error: errorReason,
+      failedAt: Date.now(),
+    };
+
+    try {
+      await fetch(alertUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (err) {
+      console.warn('Failed to dispatch DLQ alert webhook:', err);
     }
   }
 

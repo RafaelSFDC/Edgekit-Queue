@@ -68,6 +68,11 @@ export interface PublishOptions {
   dedupWindowSeconds?: number;
 
   /**
+   * Priority of the message (higher numbers are delivered first, e.g. 0, 5, 10)
+   */
+  priority?: number;
+
+  /**
    * HTTP method to send to the destination (default: 'POST')
    */
   method?: 'POST' | 'GET' | 'PUT' | 'PATCH' | 'DELETE';
@@ -81,6 +86,7 @@ export interface PublishOptions {
 export interface PublishResult {
   messageId: string;
   deduplicated?: boolean;
+  priority?: number;
 }
 
 export interface QueueMessage {
@@ -98,6 +104,7 @@ export interface QueueMessage {
   last_error?: string | null;
   callback_url?: string | null;
   dedup_id?: string | null;
+  priority?: number;
 }
 
 export interface DLQMessage {
@@ -106,11 +113,35 @@ export interface DLQMessage {
   url: string;
   payload: string;
   headers: string;
-  method: string;
   failed_at: number;
   retries: number;
   error_reason: string;
   callback_url?: string | null;
+  priority?: number;
+}
+
+export interface Schedule {
+  id: string;
+  group_id: string;
+  cron: string;
+  url: string;
+  payload: string;
+  headers: string;
+  method: string;
+  created_at: number;
+  next_run_at: number;
+  last_run_at: number | null;
+  is_paused: number;
+  retries: number;
+  callback_url: string | null;
+  priority: number;
+}
+
+export interface QueueSettings {
+  group_id: string;
+  max_concurrent_deliveries: number;
+  rate_limit_per_second: number;
+  dlq_alert_url: string | null;
 }
 
 export interface DeliveryLog {
@@ -134,6 +165,7 @@ export interface QueueStats {
   dlqCount: number;
   deliveredCount: number;
   failedCount: number;
+  schedulesCount?: number;
 }
 
 export interface VerifySignatureOptions {
@@ -292,7 +324,7 @@ export class EdgeKitQueue {
     if (!res.ok) {
       let errorMsg = `EdgeKit Queue HTTP ${res.status}: ${res.statusText}`;
       try {
-        const json = await res.json() as { error?: string; hint?: string };
+        const json = (await res.json()) as { error?: string; hint?: string };
         if (json?.error) errorMsg = json.error;
       } catch {}
       throw new Error(errorMsg);
@@ -316,6 +348,9 @@ export class EdgeKitQueue {
     }
     if (options.retries !== undefined) {
       headers['Upstash-Retries'] = String(options.retries);
+    }
+    if (options.priority !== undefined) {
+      headers['Upstash-Priority'] = String(options.priority);
     }
     if (groupId) {
       headers['Upstash-Group-Id'] = groupId;
@@ -343,6 +378,7 @@ export class EdgeKitQueue {
     const body = {
       url: options.url,
       payload: options.payload,
+      priority: options.priority,
     };
 
     return this.request<PublishResult>('/publish', {
@@ -382,6 +418,92 @@ export class EdgeKitQueue {
         { method: 'DELETE' }
       );
       return res.success;
+    },
+  };
+
+  /**
+   * Recurring Cron Schedules API
+   */
+  schedules = {
+    create: async (options: {
+      cron: string;
+      url: string;
+      payload?: unknown;
+      groupId?: string;
+      priority?: number;
+      retries?: number;
+      callbackUrl?: string;
+    }): Promise<Schedule> => {
+      const g = options.groupId || this.defaultGroupId;
+      return this.request<Schedule>('/api/v1/schedules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...options, groupId: g }),
+      });
+    },
+    list: async (groupId?: string): Promise<Schedule[]> => {
+      const g = groupId || this.defaultGroupId;
+      const data = await this.request<{ schedules: Schedule[] }>(
+        `/api/v1/schedules?groupId=${encodeURIComponent(g)}`
+      );
+      return data.schedules;
+    },
+    delete: async (id: string, groupId?: string): Promise<boolean> => {
+      const g = groupId || this.defaultGroupId;
+      const res = await this.request<{ success: boolean }>(
+        `/api/v1/schedules/${encodeURIComponent(id)}?groupId=${encodeURIComponent(g)}`,
+        { method: 'DELETE' }
+      );
+      return res.success;
+    },
+    pause: async (id: string, groupId?: string): Promise<boolean> => {
+      const g = groupId || this.defaultGroupId;
+      const res = await this.request<{ success: boolean }>(
+        `/api/v1/schedules/${encodeURIComponent(id)}/pause?groupId=${encodeURIComponent(g)}`,
+        { method: 'POST' }
+      );
+      return res.success;
+    },
+    resume: async (id: string, groupId?: string): Promise<boolean> => {
+      const g = groupId || this.defaultGroupId;
+      const res = await this.request<{ success: boolean }>(
+        `/api/v1/schedules/${encodeURIComponent(id)}/resume?groupId=${encodeURIComponent(g)}`,
+        { method: 'POST' }
+      );
+      return res.success;
+    },
+    trigger: async (id: string, groupId?: string): Promise<{ success: boolean; messageId?: string }> => {
+      const g = groupId || this.defaultGroupId;
+      return this.request<{ success: boolean; messageId?: string }>(
+        `/api/v1/schedules/${encodeURIComponent(id)}/trigger?groupId=${encodeURIComponent(g)}`,
+        { method: 'POST' }
+      );
+    },
+  };
+
+  /**
+   * Queue Settings & Concurrency API
+   */
+  settings = {
+    get: async (groupId?: string): Promise<QueueSettings> => {
+      const g = groupId || this.defaultGroupId;
+      return this.request<QueueSettings>(`/api/v1/settings?groupId=${encodeURIComponent(g)}`);
+    },
+    update: async (settings: Partial<QueueSettings>, groupId?: string): Promise<QueueSettings> => {
+      const g = groupId || this.defaultGroupId;
+      return this.request<QueueSettings>('/api/v1/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...settings, groupId: g }),
+      });
+    },
+    testAlert: async (dlqAlertUrl: string, groupId?: string): Promise<{ success: boolean; error?: string }> => {
+      const g = groupId || this.defaultGroupId;
+      return this.request<{ success: boolean; error?: string }>('/api/v1/settings/test-alert', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dlqAlertUrl, groupId: g }),
+      });
     },
   };
 

@@ -19,7 +19,7 @@ async function testAuthRouting() {
 
   // 2. Validar que as rotas da Dashboard estão aninhadas no layout protegido
   console.log('2. Validando rotas protegidas da Dashboard...');
-  const dashboardRoutes = ['/', '/messages', '/dlq', '/logs', '/redis', '/snippets'];
+  const dashboardRoutes = ['/', '/messages', '/schedules', '/dlq', '/logs', '/redis', '/snippets', '/settings'];
   for (const path of dashboardRoutes) {
     const route = routes[path];
     assert.ok(route, `A rota ${path} deve estar registrada`);
@@ -29,7 +29,7 @@ async function testAuthRouting() {
       `A rota ${path} deve ser filha de /_dashboard`
     );
   }
-  console.log('✅ Todas as rotas da dashboard (/ , /messages, /dlq, /redis, /snippets) pertencem a _dashboard!');
+  console.log('✅ Todas as rotas da dashboard (/ , /messages, /schedules, /dlq, /logs, /redis, /snippets, /settings) pertencem a _dashboard!');
 
   // 3. Validar chaves de tradução i18n para Login
   console.log('3. Validando traduções i18n (pt-BR e en)...');

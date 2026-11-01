@@ -114,6 +114,9 @@ qstashRouter.post('/publish', async (c) => {
   const dedupWindowHeader = query.dedupWindow || body?.dedupWindow || c.req.header('upstash-deduplication-timeout');
   const dedupWindowSeconds = dedupWindowHeader !== undefined ? parseInt(String(dedupWindowHeader), 10) : undefined;
 
+  const priorityHeader = query.priority || body?.priority || c.req.header('upstash-priority');
+  const priority = priorityHeader !== undefined ? parseInt(String(priorityHeader), 10) : undefined;
+
   const method = (query.method || body?.method || c.req.header('upstash-method') || 'POST').toUpperCase();
   const forwardHeaders = {
     ...extractForwardHeaders(c.req.raw.headers),
@@ -131,6 +134,7 @@ qstashRouter.post('/publish', async (c) => {
     callbackUrl,
     dedupId,
     dedupWindowSeconds,
+    priority,
   };
 
   try {
@@ -176,6 +180,9 @@ qstashRouter.post('/v2/publish/:destination{.+}', async (c) => {
   const dedupWindowHeader = c.req.header('upstash-deduplication-timeout');
   const dedupWindowSeconds = dedupWindowHeader ? parseInt(dedupWindowHeader, 10) : undefined;
 
+  const priorityHeader = c.req.header('upstash-priority') || c.req.query('priority');
+  const priority = priorityHeader !== undefined ? parseInt(String(priorityHeader), 10) : undefined;
+
   const method = (c.req.header('upstash-method') || 'POST').toUpperCase();
   const forwardHeaders = extractForwardHeaders(c.req.raw.headers);
 
@@ -196,6 +203,7 @@ qstashRouter.post('/v2/publish/:destination{.+}', async (c) => {
       callbackUrl,
       dedupId,
       dedupWindowSeconds,
+      priority,
     });
 
     return c.json({ messageId: result.messageId, deduplicated: result.deduplicated }, 201);
@@ -317,4 +325,206 @@ qstashRouter.post('/purge', async (c) => {
   const stub = getStashStub(c.env, groupId);
   await stub.purgeQueue(groupId, target);
   return c.json({ ok: true, purged: target, groupId });
+});
+
+// =========================================================================
+// SCHEDULES ENDPOINTS (CRON JOBS)
+// =========================================================================
+
+/**
+ * Standard /api/v1/schedules (POST JSON create schedule)
+ */
+qstashRouter.post('/api/v1/schedules', async (c) => {
+  let body: any = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Request body must be valid JSON' }, 400);
+  }
+
+  const { cron, url, payload, groupId = 'default', headers, method = 'POST', retries, callbackUrl, priority } = body;
+  if (!cron || !url) {
+    return c.json({ error: 'Both "cron" and "url" fields are required.' }, 400);
+  }
+
+  try {
+    const coordStub = getStashStub(c.env, 'default');
+    await coordStub.registerGroup(groupId);
+
+    const stub = getStashStub(c.env, groupId);
+    const schedule = await stub.createSchedule({
+      cron,
+      url,
+      payload,
+      groupId,
+      headers,
+      method,
+      retries,
+      callbackUrl,
+      priority,
+    });
+
+    return c.json(schedule, 201);
+  } catch (err: any) {
+    return c.json({ error: err?.message || 'Failed to create schedule' }, 400);
+  }
+});
+
+/**
+ * QStash compatible: POST /v2/schedules/:destinationUrl
+ */
+qstashRouter.post('/v2/schedules/:destination{.+}', async (c) => {
+  let destination = c.req.param('destination');
+  if (!destination.startsWith('http://') && !destination.startsWith('https://')) {
+    destination = `https://${destination}`;
+  }
+
+  const cron = c.req.header('upstash-cron') || c.req.query('cron');
+  if (!cron) {
+    return c.json({ error: 'Header Upstash-Cron or query parameter cron is required' }, 400);
+  }
+
+  let payload: any;
+  const contentType = c.req.header('content-type') || '';
+  if (contentType.includes('application/json')) {
+    try { payload = await c.req.json(); } catch { payload = {}; }
+  } else {
+    payload = await c.req.text();
+  }
+
+  const groupId = c.req.header('upstash-group-id') || c.req.query('groupId') || 'default';
+  const retriesHeader = c.req.header('upstash-retries') || c.req.query('retries');
+  const retries = retriesHeader !== undefined ? parseInt(String(retriesHeader), 10) : undefined;
+  const callbackUrl = c.req.header('upstash-callback') || undefined;
+  const priorityHeader = c.req.header('upstash-priority') || c.req.query('priority');
+  const priority = priorityHeader !== undefined ? parseInt(String(priorityHeader), 10) : undefined;
+  const method = (c.req.header('upstash-method') || 'POST').toUpperCase();
+  const forwardHeaders = extractForwardHeaders(c.req.raw.headers);
+
+  try {
+    const coordStub = getStashStub(c.env, 'default');
+    await coordStub.registerGroup(groupId);
+
+    const stub = getStashStub(c.env, groupId);
+    const schedule = await stub.createSchedule({
+      cron,
+      url: destination,
+      payload,
+      groupId,
+      headers: forwardHeaders,
+      method,
+      retries,
+      callbackUrl,
+      priority,
+    });
+
+    return c.json({ scheduleId: schedule.id, cron: schedule.cron, nextRunAt: schedule.next_run_at }, 201);
+  } catch (err: any) {
+    return c.json({ error: err?.message || 'Failed to create schedule' }, 400);
+  }
+});
+
+/**
+ * List Schedules: GET /api/v1/schedules and GET /v2/schedules
+ */
+const listSchedulesHandler = async (c: any) => {
+  const groupId = c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const schedules = await stub.listSchedules(groupId);
+  return c.json({ schedules });
+};
+qstashRouter.get('/api/v1/schedules', listSchedulesHandler);
+qstashRouter.get('/v2/schedules', listSchedulesHandler);
+
+/**
+ * Get Schedule: GET /api/v1/schedules/:id
+ */
+const getScheduleHandler = async (c: any) => {
+  const id = c.req.param('id');
+  const groupId = c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const schedule = await stub.getSchedule(id);
+  if (!schedule) {
+    return c.json({ error: 'Schedule not found' }, 404);
+  }
+  return c.json(schedule);
+};
+qstashRouter.get('/api/v1/schedules/:id', getScheduleHandler);
+qstashRouter.get('/v2/schedules/:id', getScheduleHandler);
+
+/**
+ * Delete Schedule: DELETE /api/v1/schedules/:id
+ */
+const deleteScheduleHandler = async (c: any) => {
+  const id = c.req.param('id');
+  const groupId = c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const success = await stub.deleteSchedule(id);
+  return c.json({ success });
+};
+qstashRouter.delete('/api/v1/schedules/:id', deleteScheduleHandler);
+qstashRouter.delete('/v2/schedules/:id', deleteScheduleHandler);
+
+/**
+ * Pause / Resume Schedule
+ */
+qstashRouter.post('/api/v1/schedules/:id/pause', async (c) => {
+  const id = c.req.param('id');
+  const groupId = c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const success = await stub.togglePauseSchedule(id, true);
+  return c.json({ success, is_paused: 1 });
+});
+
+qstashRouter.post('/api/v1/schedules/:id/resume', async (c) => {
+  const id = c.req.param('id');
+  const groupId = c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const success = await stub.togglePauseSchedule(id, false);
+  return c.json({ success, is_paused: 0 });
+});
+
+qstashRouter.post('/api/v1/schedules/:id/trigger', async (c) => {
+  const id = c.req.param('id');
+  const groupId = c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const res = await stub.triggerScheduleNow(id);
+  return c.json(res);
+});
+
+// =========================================================================
+// SETTINGS ENDPOINTS (CONCURRENCY, RATE LIMIT, DLQ ALERTS)
+// =========================================================================
+
+qstashRouter.get('/api/v1/settings', async (c) => {
+  const groupId = c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const settings = await stub.getQueueSettings(groupId);
+  return c.json(settings);
+});
+
+qstashRouter.post('/api/v1/settings', async (c) => {
+  let body: any = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const groupId = body.groupId || c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const updated = await stub.updateQueueSettings(groupId, body);
+  return c.json(updated);
+});
+
+qstashRouter.post('/api/v1/settings/test-alert', async (c) => {
+  let body: any = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const groupId = body.groupId || c.req.query('groupId') || 'default';
+  const stub = getStashStub(c.env, groupId);
+  const res = await stub.testDlqAlert(groupId, body.dlqAlertUrl);
+  return c.json(res);
 });

@@ -169,6 +169,7 @@ export const MessagesPage: React.FC = () => {
                   <TableRow className="hover:bg-transparent">
                     <TableHead className="w-[180px]">{t.messages.tableId}</TableHead>
                     <TableHead>{t.messages.tableUrl}</TableHead>
+                    <TableHead className="w-[100px]">{t.messages.tablePriority}</TableHead>
                     <TableHead className="w-[120px]">{t.messages.tableStatus}</TableHead>
                     <TableHead className="w-[150px]">{t.messages.tableScheduled}</TableHead>
                     <TableHead className="w-[100px] text-center">{t.messages.tableRetries}</TableHead>
@@ -189,6 +190,21 @@ export const MessagesPage: React.FC = () => {
                           <div className="max-w-md truncate font-mono text-xs text-muted-foreground">
                             {msg.url}
                           </div>
+                        </TableCell>
+                        <TableCell>
+                          {msg.priority >= 10 ? (
+                            <Badge className="bg-rose-500/15 text-rose-500 hover:bg-rose-500/20 border-rose-500/30 text-[10px] py-0 px-1.5 font-semibold">
+                              {t.messages.priorityUrgent} ({msg.priority})
+                            </Badge>
+                          ) : msg.priority >= 5 ? (
+                            <Badge className="bg-amber-500/15 text-amber-500 hover:bg-amber-500/20 border-amber-500/30 text-[10px] py-0 px-1.5 font-semibold">
+                              {t.messages.priorityHigh} ({msg.priority})
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-[10px] py-0 px-1.5 text-muted-foreground">
+                              {t.messages.priorityNormal}
+                            </Badge>
+                          )}
                         </TableCell>
                         <TableCell>
                           <Badge

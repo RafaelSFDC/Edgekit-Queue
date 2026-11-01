@@ -2,10 +2,12 @@ import React, { useState } from 'react';
 import {
   Home,
   Layers,
+  CalendarClock,
   AlertOctagon,
   Clock,
   Database,
   Code2,
+  Settings,
   Search,
 } from 'lucide-react';
 import { Link, useRouterState } from '@tanstack/react-router';
@@ -61,6 +63,13 @@ export const AppSidebar: React.FC = () => {
       badgeVariant: 'secondary' as const,
     },
     {
+      to: '/schedules',
+      label: t.sidebar.schedules,
+      icon: <CalendarClock className="size-4 shrink-0" />,
+      badge: (stats?.schedulesCount || 0) > 0 ? stats?.schedulesCount : undefined,
+      badgeVariant: 'secondary' as const,
+    },
+    {
       to: '/dlq',
       label: t.sidebar.dlq,
       icon: <AlertOctagon className="size-4 shrink-0" />,
@@ -85,6 +94,13 @@ export const AppSidebar: React.FC = () => {
       to: '/snippets',
       label: t.sidebar.snippets,
       icon: <Code2 className="size-4 shrink-0" />,
+      badge: undefined,
+      badgeVariant: 'secondary' as const,
+    },
+    {
+      to: '/settings',
+      label: t.sidebar.settings,
+      icon: <Settings className="size-4 shrink-0" />,
       badge: undefined,
       badgeVariant: 'secondary' as const,
     },

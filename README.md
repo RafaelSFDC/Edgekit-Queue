@@ -10,7 +10,7 @@
 [![Zero Infra](https://img.shields.io/badge/Infra-100%25%20Serverless-pink)](#)
 
 > **Serverless, open-source Upstash (QStash + Redis) clone running on Cloudflare Workers using Hono and SQLite Durable Objects.**  
-> HTTP asynchronous queue with flexible delay scheduling, automatic retries with exponential backoff, DLQ with 1-click replaying, embedded Redis REST key-value store (supporting Sorted Sets / `@upstash/ratelimit`), and a modern interactive dashboard in React 19 + Tailwind CSS v4.
+> HTTP asynchronous queue with flexible delay scheduling, recurring cron schedules, message priority queues, concurrency control & throttling, automatic retries with exponential backoff, DLQ with instant Discord/Slack webhook alerts, embedded Redis REST key-value store (supporting Sorted Sets / `@upstash/ratelimit`), and a modern interactive dashboard in React 19 + Tailwind CSS v4.
 
 ---
 
@@ -22,10 +22,12 @@
 - [Prerequisites](#-prerequisites)
 - [Quick Start & Local Development](#-quick-start--local-development)
 - [REST API Reference](#-rest-api-reference)
-  - [1. Message Queue / QStash](#1-message-queue--qstash)
-  - [2. Dead Letter Queue (DLQ)](#2-dead-letter-queue-dlq)
-  - [3. Audit & Delivery Logs](#3-audit--delivery-logs)
-  - [4. Embedded Redis REST Store](#4-embedded-redis-rest-store)
+  - [1. Message Queue & Priority](#1-message-queue--priority)
+  - [2. Recurring Cron Schedules](#2-recurring-cron-schedules)
+  - [3. Dead Letter Queue (DLQ) & Discord/Slack Alerts](#3-dead-letter-queue-dlq--discordslack-alerts)
+  - [4. Concurrency Control & Settings](#4-concurrency-control--settings)
+  - [5. Audit & Delivery Logs](#5-audit--delivery-logs)
+  - [6. Embedded Redis REST Store](#6-embedded-redis-rest-store)
 - [Zero-Dependency shadcn-style Snippet](#-zero-dependency-shadcn-style-snippet)
 - [Deploying to Cloudflare](#-deploying-to-cloudflare)
 - [License](#-license)
@@ -47,12 +49,16 @@ Interacting with native Cloudflare Queues strictly through the Cloudflare Dashbo
 
 - ⚡ **100% Serverless**: Runs completely on Cloudflare's edge network with zero dedicated virtual machines.
 - ⏱️ **Flexible Delay Scheduling**: Delays formatted as `"10s"`, `"30s"`, `"5m"`, `"2h"`, `"1d"`, or UNIX epoch timestamps.
+- ⏰ **Recurring Cron Schedules**: Schedule recurring jobs with 5-part cron syntax (e.g. `*/5 * * * *`, `0 9 * * 1-5`, `@daily`).
+- 🎯 **Message Priority (Priority Queues)**: Higher priority messages (e.g. `priority: 10`) jump ahead of lower priority tasks.
+- 🚦 **Concurrency Control & Throttling**: Configure maximum concurrent active deliveries to avoid overwhelming destination servers.
 - 🔄 **Exponential Backoff Retries**: Automatically retries failed endpoints (4xx/5xx or timeouts) with intelligent backoff intervals.
 - 📬 **Dead Letter Queue (DLQ)**: Captures permanently failed messages for debugging and 1-click reprocessing.
+- 🔔 **Instant DLQ Alerts**: Automatic webhook alerts (compatible with Discord, Slack, and custom webhooks) upon final failure.
 - 🔐 **Cryptographic Signatures (`Upstash-Signature`)**: Signs outgoing webhooks with HMAC-SHA256 (JWT) for secure receiver validation.
 - 🛡️ **TTL Deduplication**: Prevents duplicate executions using custom keys (`dedupId`).
 - ⚡ **Redis REST Store with ZSET**: Supports Strings, Hashes, Lists, and Sorted Sets — **enables `@upstash/ratelimit` at the edge**.
-- 🖥️ **Integrated Web Dashboard**: Modern UI in **React 19 + Tailwind CSS v4** with live stats, message inspector, interactive Redis CLI, and i18n.
+- 🖥️ **Integrated Web Dashboard**: Modern UI in **React 19 + Tailwind CSS v4** with live stats, cron schedules manager, settings, message inspector, and i18n.
 - 📦 **Zero-Dependency Drop-In Snippets**: Copy [`snippets/queue.ts`](snippets/queue.ts) or [`snippets/queue.py`](snippets/queue.py) directly into your app.
 
 ---
@@ -62,17 +68,20 @@ Interacting with native Cloudflare Queues strictly through the Cloudflare Dashbo
 ```
 [Your App / Vercel / Next.js / VPS]
         │
-        ▼ (POST /publish with X-API-Key and Upstash-Delay)
+        ▼ (POST /publish with X-API-Key, Upstash-Delay, Upstash-Priority)
 [Edgekit Queue Worker (Hono)]
         │
         ▼ (Persists into SQLite and schedules alarm)
 [Durable Object: StashStorage]
         │
-        ▼ (Alarm triggers after specified delay)
+        ▼ (Alarm triggers after specified delay or on Cron schedule)
 [Dispatches HTTP Webhook Signed with HMAC-SHA256]
         │
         ├─► [HTTP 200 OK]  ──► Success! Deleted from queue & audit logged.
         └─► [HTTP 5xx/Err] ──► Exponential retry ──► DLQ (if retries exhausted)
+                                                      │
+                                                      ▼
+                                           [Dispatches Discord/Slack Alert]
 ```
 
 ---
@@ -128,7 +137,7 @@ Authenticate requests using any of the following:
 
 ---
 
-### 1. Message Queue / QStash
+### 1. Message Queue & Priority
 
 #### `POST /publish`
 Publishes a message to be asynchronously dispatched to a destination URL.
@@ -136,6 +145,7 @@ Publishes a message to be asynchronously dispatched to a destination URL.
 **Supported Headers:**
 * `Upstash-Delay`: e.g. `"10s"`, `"5m"`, `"2h"`, or UNIX epoch ms.
 * `Upstash-Retries`: Maximum retry count (default: 3).
+* `Upstash-Priority`: Priority number (`0` to `100`; higher numbers processed first).
 * `Upstash-Group-Id`: Isolated queue / group identifier (default: `"default"`).
 * `Upstash-Callback`: Callback URL invoked after delivery success or final failure.
 * `Upstash-Dedup-Id`: Deduplication key (discards duplicate messages during TTL window).
@@ -148,29 +158,12 @@ curl -X POST "http://localhost:8787/publish" \
   -H "Content-Type: application/json" \
   -H "Upstash-Delay: 1m" \
   -H "Upstash-Retries: 3" \
+  -H "Upstash-Priority: 10" \
   -d '{
     "url": "https://my-app.com/api/webhooks/process",
-    "payload": { "orderId": "ord_123", "status": "paid" }
+    "payload": { "orderId": "ord_123", "status": "paid" },
+    "priority": 10
   }'
-```
-
-**Response:**
-```json
-{
-  "messageId": "msg_8f10b7b1...",
-  "deduplicated": false
-}
-```
-
-#### `POST /v2/publish/:destinationUrl`
-QStash v2 REST endpoint compatible format.
-
-```bash
-curl -X POST "http://localhost:8787/v2/publish/https://my-app.com/api/webhooks/process" \
-  -H "Authorization: Bearer your_key" \
-  -H "Upstash-Delay: 10s" \
-  -H "Content-Type: application/json" \
-  -d '{"event": "user.signup"}'
 ```
 
 #### `GET /messages`
@@ -182,7 +175,32 @@ Cancels and removes a pending message from the queue.
 
 ---
 
-### 2. Dead Letter Queue (DLQ)
+### 2. Recurring Cron Schedules
+
+#### `POST /api/v1/schedules`
+Creates a recurring cron job:
+```bash
+curl -X POST "http://localhost:8787/api/v1/schedules" \
+  -H "X-API-Key: your_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "cron": "*/5 * * * *",
+    "url": "https://my-app.com/api/webhooks/cron",
+    "payload": { "task": "sync_inventory" },
+    "priority": 5
+  }'
+```
+
+#### Schedule Management Endpoints:
+* `GET /api/v1/schedules` — List schedules for a group.
+* `POST /api/v1/schedules/:id/pause` — Pause a schedule.
+* `POST /api/v1/schedules/:id/resume` — Resume a schedule.
+* `POST /api/v1/schedules/:id/trigger` — Trigger a manual run now.
+* `DELETE /api/v1/schedules/:id` — Delete a schedule.
+
+---
+
+### 3. Dead Letter Queue (DLQ) & Discord/Slack Alerts
 
 #### `GET /dlq`
 Lists messages that exhausted all delivery retry attempts.
@@ -195,7 +213,29 @@ Permanently discards a message from the DLQ.
 
 ---
 
-### 3. Audit & Delivery Logs
+### 4. Concurrency Control & Settings
+
+#### `GET /api/v1/settings`
+Returns current concurrency limit and DLQ alert webhook URL.
+
+#### `POST /api/v1/settings`
+Updates concurrency and webhook settings:
+```bash
+curl -X POST "http://localhost:8787/api/v1/settings" \
+  -H "X-API-Key: your_key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "maxConcurrentDeliveries": 10,
+    "dlqAlertUrl": "https://discord.com/api/webhooks/YOUR_WEBHOOK"
+  }'
+```
+
+#### `POST /api/v1/settings/test-alert`
+Sends a test ping to the configured alert webhook.
+
+---
+
+### 5. Audit & Delivery Logs
 
 #### `GET /logs`
 Returns recent delivery attempts with millisecond latency, HTTP status codes, and error details.
@@ -205,7 +245,7 @@ Clears delivery logs for the specified queue group.
 
 ---
 
-### 4. Embedded Redis REST Store
+### 6. Embedded Redis REST Store
 
 Edgekit Queue emulates the Upstash Redis REST interface:
 

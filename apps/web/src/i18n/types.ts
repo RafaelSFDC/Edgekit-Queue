@@ -36,16 +36,20 @@ export interface Translations {
   breadcrumbs: {
     overview: string;
     messages: string;
+    schedules: string;
     dlq: string;
     redis: string;
     snippets: string;
+    settings: string;
   };
   sidebar: {
     home: string;
     messages: string;
+    schedules: string;
     dlq: string;
     redis: string;
     snippets: string;
+    settings: string;
     quickSearch: string;
   };
   overview: {
@@ -76,6 +80,10 @@ export interface Translations {
     tableId: string;
     tableUrl: string;
     tableStatus: string;
+    tablePriority: string;
+    priorityNormal: string;
+    priorityHigh: string;
+    priorityUrgent: string;
     tableScheduled: string;
     tableRetries: string;
     tableCreatedAt: string;
@@ -85,6 +93,37 @@ export interface Translations {
     deleteSuccess: string;
     purgeConfirm: string;
     purgeSuccess: string;
+  };
+  schedules: {
+    title: string;
+    subtitle: string;
+    createBtn: string;
+    tableId: string;
+    tableCron: string;
+    tableUrl: string;
+    tableNextRun: string;
+    tableLastRun: string;
+    tableStatus: string;
+    tablePriority: string;
+    statusActive: string;
+    statusPaused: string;
+    pauseSuccess: string;
+    resumeSuccess: string;
+    deleteSuccess: string;
+    triggerSuccess: string;
+    triggerBtn: string;
+    noSchedules: string;
+    noSchedulesDesc: string;
+    modalTitle: string;
+    modalSubtitle: string;
+    cronLabel: string;
+    cronPlaceholder: string;
+    urlLabel: string;
+    urlPlaceholder: string;
+    payloadLabel: string;
+    priorityLabel: string;
+    createSuccess: string;
+    presetsLabel: string;
   };
   dlq: {
     title: string;
@@ -127,6 +166,21 @@ export interface Translations {
     python: string;
     curl: string;
     copyCode: string;
+  };
+  settings: {
+    title: string;
+    subtitle: string;
+    concurrencyTitle: string;
+    concurrencyDesc: string;
+    concurrencyLabel: string;
+    dlqAlertTitle: string;
+    dlqAlertDesc: string;
+    dlqAlertLabel: string;
+    dlqAlertPlaceholder: string;
+    testAlertBtn: string;
+    testAlertSuccess: string;
+    testAlertError: string;
+    saveSuccess: string;
   };
   login: {
     title: string;

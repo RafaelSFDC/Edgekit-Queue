@@ -157,7 +157,8 @@ export default {
       const coordStub = getStashStub(env, 'default');
       const groups = await coordStub.listGroups();
       for (const group of groups.slice(0, 10)) {
-        ctx.waitUntil(getStashStub(env, group).consumeQueue(20));
+        const stub = getStashStub(env, group);
+        ctx.waitUntil(stub.triggerDueSchedules().then(() => stub.consumeQueue(20)));
       }
     } catch (err) {
       console.error('[Edgekit Queue] Scheduled sweep error:', err);

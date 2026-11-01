@@ -18,6 +18,8 @@ const DlqPage = lazy(() => import('./pages/DlqPage').then((m) => ({ default: m.D
 const LogsPage = lazy(() => import('./pages/LogsPage').then((m) => ({ default: m.LogsPage })));
 const RedisPage = lazy(() => import('./pages/RedisPage').then((m) => ({ default: m.RedisPage })));
 const SnippetsPage = lazy(() => import('./pages/SnippetsPage').then((m) => ({ default: m.SnippetsPage })));
+const SchedulesPage = lazy(() => import('./pages/SchedulesPage').then((m) => ({ default: m.SchedulesPage })));
+const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 
 const PageSuspense: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <Suspense
@@ -140,16 +142,38 @@ const snippetsRoute = createRoute({
   ),
 });
 
+const schedulesRoute = createRoute({
+  getParentRoute: () => dashboardRoute,
+  path: '/schedules',
+  component: () => (
+    <PageSuspense>
+      <SchedulesPage />
+    </PageSuspense>
+  ),
+});
+
+const settingsRoute = createRoute({
+  getParentRoute: () => dashboardRoute,
+  path: '/settings',
+  component: () => (
+    <PageSuspense>
+      <SettingsPage />
+    </PageSuspense>
+  ),
+});
+
 // 5. Mount Route Tree
 const routeTree = rootRoute.addChildren([
   loginRoute,
   dashboardRoute.addChildren([
     indexRoute,
     messagesRoute,
+    schedulesRoute,
     dlqRoute,
     logsRoute,
     redisRoute,
     snippetsRoute,
+    settingsRoute,
   ]),
 ]);
 

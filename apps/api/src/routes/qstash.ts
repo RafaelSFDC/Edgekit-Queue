@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import type { Env, PublishOptions } from '../types.js';
 import type { StashStorage } from '../durable-object/stash-storage.js';
+import { getConfiguredApiKey } from '../services/auth.js';
 
 export const qstashRouter = new Hono<{ Bindings: Env }>();
 
@@ -29,10 +30,14 @@ function extractForwardHeaders(headers: Headers): Record<string, string> {
 
 /**
  * Upstash QStash Keys endpoint: GET /v2/keys
- * Used by Upstash Receiver SDK to fetch current & next signing keys
+ * Used by Upstash Receiver SDK to fetch current & next signing keys.
+ * Protected by authentication middleware.
  */
 qstashRouter.get('/v2/keys', (c) => {
-  const current = c.env.QSTASH_CURRENT_SIGNING_KEY || c.env.API_KEY || 'stash_secret_key';
+  const current = c.env.QSTASH_CURRENT_SIGNING_KEY || getConfiguredApiKey(c.env);
+  if (!current) {
+    return c.json({ error: 'Signing key is not configured' }, 500);
+  }
   const next = c.env.QSTASH_NEXT_SIGNING_KEY || current;
   return c.json({
     current,
@@ -220,7 +225,7 @@ qstashRouter.all('/process', async (c) => {
   const limit = parseInt(c.req.query('limit') || '10', 10);
 
   const stub = getStashStub(c.env, groupId);
-  const result = await stub.consumeQueue(limit);
+  const result = await stub.consumeQueue(limit, groupId);
   return c.json({ ok: true, groupId, ...result });
 });
 

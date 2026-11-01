@@ -3,7 +3,7 @@
  */
 async function publishJob() {
   const STASH_URL = process.env.STASH_URL || 'http://localhost:8787';
-  const API_KEY = process.env.STASH_KEY || 'stash_secret_key';
+  const API_KEY = process.env.EDGEKIT_API_KEY || process.env.STASH_KEY || 'your-api-key';
 
   // 1. Immediate Delivery
   console.log('Publishing immediate task...');

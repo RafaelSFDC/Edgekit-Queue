@@ -48,10 +48,13 @@ export class StashStorage extends DurableObject {
         max_retries INTEGER DEFAULT 3,
         last_error TEXT,
         callback_url TEXT,
-        dedup_id TEXT
+        dedup_id TEXT,
+        priority INTEGER DEFAULT 0,
+        processing_started_at INTEGER DEFAULT 0
       );
 
-      CREATE INDEX IF NOT EXISTS idx_queue_visibility ON queue(status, visibility_at);
+      CREATE INDEX IF NOT EXISTS idx_queue_visibility ON queue(group_id, status, visibility_at);
+      CREATE INDEX IF NOT EXISTS idx_queue_processing ON queue(group_id, status, processing_started_at);
       CREATE INDEX IF NOT EXISTS idx_queue_dedup ON queue(dedup_id);
 
       CREATE TABLE IF NOT EXISTS queue_dlq (
@@ -175,6 +178,9 @@ export class StashStorage extends DurableObject {
       const qCols = (await this.ctx.storage.sql.exec(`PRAGMA table_info(queue)`)).toArray() as any[];
       if (!qCols.some((c) => c.name === 'priority')) {
         await this.ctx.storage.sql.exec(`ALTER TABLE queue ADD COLUMN priority INTEGER DEFAULT 0`);
+      }
+      if (!qCols.some((c) => c.name === 'processing_started_at')) {
+        await this.ctx.storage.sql.exec(`ALTER TABLE queue ADD COLUMN processing_started_at INTEGER DEFAULT 0`);
       }
     } catch {}
 
@@ -311,7 +317,7 @@ export class StashStorage extends DurableObject {
       await this.scheduleEarliestAlarm(visibilityAt);
     } else {
       // Immediate delivery: trigger in background without blocking response
-      this.ctx.waitUntil(this.consumeQueue());
+      this.ctx.waitUntil(this.consumeQueue(undefined, groupId));
     }
 
     return {
@@ -326,69 +332,227 @@ export class StashStorage extends DurableObject {
   }
 
   /**
+   * Helper to insert into delivery_logs with automatic retention pruning (keep 300 per group)
+   */
+  private async insertDeliveryLog(
+    messageId: string,
+    groupId: string,
+    url: string,
+    method: string,
+    statusCode: number | null,
+    success: boolean,
+    latencyMs: number,
+    retries: number,
+    error: string | null
+  ): Promise<void> {
+    try {
+      await this.ctx.storage.sql.exec(
+        `INSERT INTO delivery_logs (
+          id, message_id, group_id, url, method, status_code, success, latency_ms, retries, error, delivered_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        crypto.randomUUID(),
+        messageId,
+        groupId,
+        url,
+        method || 'POST',
+        statusCode,
+        success ? 1 : 0,
+        latencyMs,
+        retries,
+        error || null,
+        Date.now()
+      );
+
+      await this.ctx.storage.sql.exec(
+        `DELETE FROM delivery_logs
+         WHERE id NOT IN (
+           SELECT id FROM delivery_logs WHERE group_id = ? ORDER BY delivered_at DESC LIMIT 300
+         ) AND group_id = ?`,
+        groupId,
+        groupId
+      );
+    } catch (logErr) {
+      console.warn('Failed to insert delivery log:', logErr);
+    }
+  }
+
+  /**
+   * Processing lease duration in milliseconds.
+   * If a message stays in PROCESSING state longer than this duration, it is considered abandoned/interrupted.
+   */
+  private getLeaseTimeoutMs(): number {
+    const customTimeout = Number(this.envConfig.PROCESSING_LEASE_TIMEOUT);
+    if (customTimeout && customTimeout > 0) {
+      return customTimeout * 1000;
+    }
+    const httpTimeoutSeconds = Number(this.envConfig.HTTP_REQUEST_TIMEOUT) || 15;
+    return Math.max(30_000, httpTimeoutSeconds * 2 * 1000);
+  }
+
+  /**
+   * Scan for messages stuck in PROCESSING state beyond the lease timeout.
+   * Recovers them by either moving to DLQ (if retries exhausted) or returning to PENDING.
+   */
+  async recoverStaleProcessingMessages(targetGroupId?: string): Promise<number> {
+    const now = Date.now();
+    const leaseTimeoutMs = this.getLeaseTimeoutMs();
+    const staleBefore = now - leaseTimeoutMs;
+
+    const query = targetGroupId
+      ? `SELECT id, group_id, url, payload, headers, method, retries, max_retries, callback_url, priority
+         FROM queue
+         WHERE group_id = ? AND status = ? AND processing_started_at > 0 AND processing_started_at <= ?`
+      : `SELECT id, group_id, url, payload, headers, method, retries, max_retries, callback_url, priority
+         FROM queue
+         WHERE status = ? AND processing_started_at > 0 AND processing_started_at <= ?`;
+
+    const params = targetGroupId
+      ? [targetGroupId, MESSAGE_STATUS.PROCESSING, staleBefore]
+      : [MESSAGE_STATUS.PROCESSING, staleBefore];
+
+    const staleRows = (await this.ctx.storage.sql.exec(query, ...params)).toArray() as any[];
+    if (staleRows.length === 0) return 0;
+
+    for (const msg of staleRows) {
+      const nextRetries = Number(msg.retries) + 1;
+      const maxRetries = Number(msg.max_retries) || 3;
+      const errorReason = `Processing lease expired (interrupted or exceeded lease timeout of ${Math.round(leaseTimeoutMs / 1000)}s)`;
+
+      if (nextRetries >= maxRetries) {
+        // Move to DLQ
+        await this.ctx.storage.sql.exec(
+          `INSERT INTO queue_dlq (
+            id, group_id, url, payload, headers, method, failed_at, retries, error_reason, callback_url, priority
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          msg.id,
+          msg.group_id,
+          msg.url,
+          msg.payload,
+          msg.headers,
+          msg.method || 'POST',
+          now,
+          nextRetries,
+          errorReason,
+          msg.callback_url,
+          msg.priority || 0
+        );
+        await this.ctx.storage.sql.exec(`DELETE FROM queue WHERE id = ?`, msg.id);
+
+        await this.insertDeliveryLog(msg.id, msg.group_id, msg.url, msg.method, null, false, leaseTimeoutMs, nextRetries, errorReason);
+
+        this.ctx.waitUntil(this.dispatchDlqAlert(msg, errorReason, nextRetries));
+      } else {
+        // Reset to PENDING with backoff so it can be picked up again
+        const backoffMs = Math.min(60_000, 1000 * Math.pow(2, nextRetries));
+        await this.ctx.storage.sql.exec(
+          `UPDATE queue
+           SET status = ?, retries = ?, visibility_at = ?, last_error = ?, processing_started_at = 0
+           WHERE id = ?`,
+          MESSAGE_STATUS.PENDING,
+          nextRetries,
+          now + backoffMs,
+          errorReason,
+          msg.id
+        );
+        await this.insertDeliveryLog(msg.id, msg.group_id, msg.url, msg.method, null, false, leaseTimeoutMs, nextRetries, errorReason);
+      }
+    }
+
+    return staleRows.length;
+  }
+
+  /**
    * Consume and dispatch due messages
    */
-  async consumeQueue(batchSizeLimit?: number): Promise<{ processed: number; succeeded: number; failed: number }> {
+  async consumeQueue(
+    batchSizeLimit?: number,
+    targetGroupId?: string
+  ): Promise<{ processed: number; succeeded: number; failed: number }> {
     const now = Date.now();
 
-    // Check concurrency limits
-    const settings = await this.getQueueSettings('default');
-    const maxConcurrency = settings.max_concurrent_deliveries || Number(this.envConfig.MAX_CONCURRENT_DELIVERIES) || 10;
+    // 1. Recover any stale processing messages (interrupted executions / crashed workers)
+    await this.recoverStaleProcessingMessages(targetGroupId);
 
-    // Count currently processing messages
-    const activeResult = await this.ctx.storage.sql.exec(
-      `SELECT count(id) as count FROM queue WHERE status = ?`,
-      MESSAGE_STATUS.PROCESSING
-    );
-    const activeCount = Number(activeResult.toArray()[0]?.count) || 0;
-    const availableSlots = Math.max(0, maxConcurrency - activeCount);
-
-    if (availableSlots <= 0) {
-      await this.scheduleNextPendingAlarm();
-      return { processed: 0, succeeded: 0, failed: 0 };
+    // 2. Determine groups to process
+    let groupsToProcess: string[] = [];
+    if (targetGroupId) {
+      groupsToProcess = [targetGroupId];
+    } else {
+      const groupsResult = await this.ctx.storage.sql.exec(
+        `SELECT DISTINCT group_id FROM queue WHERE status = ? OR status = ?`,
+        MESSAGE_STATUS.PENDING,
+        MESSAGE_STATUS.PROCESSING
+      );
+      const rows = groupsResult.toArray();
+      groupsToProcess = rows.map((r) => String(r.group_id));
+      if (groupsToProcess.length === 0) {
+        groupsToProcess = ['default'];
+      }
     }
 
-    const maxLimit = Math.min(batchSizeLimit || maxConcurrency, availableSlots);
+    let totalProcessed = 0;
+    let totalSucceeded = 0;
+    let totalFailed = 0;
 
-    // Atomically select and lock pending messages by Priority DESC, created_at ASC
-    const result = await this.ctx.storage.sql.exec(
-      `UPDATE queue
-       SET status = ?
-       WHERE id IN (
-         SELECT id FROM queue
-         WHERE status = ? AND (visibility_at = 0 OR visibility_at <= ?)
-         ORDER BY priority DESC, created_at ASC
-         LIMIT ?
-       )
-       RETURNING id, group_id, url, payload, headers, method, created_at,
-                 visibility_at, status, retries, max_retries, last_error, callback_url, dedup_id, priority`,
-      MESSAGE_STATUS.PROCESSING,
-      MESSAGE_STATUS.PENDING,
-      now,
-      maxLimit
-    );
+    for (const groupId of groupsToProcess) {
+      // Check concurrency limits for THIS specific group
+      const settings = await this.getQueueSettings(groupId);
+      const maxConcurrency = Math.max(
+        1,
+        settings.max_concurrent_deliveries ||
+          Number(this.envConfig.MAX_CONCURRENT_DELIVERIES) ||
+          10
+      );
 
-    const messages = result.toArray() as unknown as QueueMessage[];
-    if (messages.length === 0) {
-      await this.scheduleNextPendingAlarm();
-      return { processed: 0, succeeded: 0, failed: 0 };
+      const batchLimit = Math.max(1, batchSizeLimit || maxConcurrency);
+
+      // Atomically select and lock pending messages by Priority DESC, created_at ASC
+      // The LIMIT clause computes available slots atomically:
+      // MAX(0, MIN(batchLimit, maxConcurrency - currentProcessingCount))
+      const result = await this.ctx.storage.sql.exec(
+        `UPDATE queue
+         SET status = ?, processing_started_at = ?
+         WHERE id IN (
+           SELECT id FROM queue
+           WHERE group_id = ?
+             AND status = ?
+             AND (visibility_at = 0 OR visibility_at <= ?)
+           ORDER BY priority DESC, created_at ASC
+           LIMIT MAX(0, MIN(?, ? - (SELECT COUNT(*) FROM queue WHERE group_id = ? AND status = ?)))
+         )
+         RETURNING id, group_id, url, payload, headers, method, created_at,
+                   visibility_at, status, retries, max_retries, last_error, callback_url, dedup_id, priority, processing_started_at`,
+        MESSAGE_STATUS.PROCESSING,
+        now,
+        groupId,
+        MESSAGE_STATUS.PENDING,
+        now,
+        batchLimit,
+        maxConcurrency,
+        groupId,
+        MESSAGE_STATUS.PROCESSING
+      );
+
+      const messages = result.toArray() as unknown as QueueMessage[];
+      if (messages.length === 0) {
+        continue;
+      }
+
+      totalProcessed += messages.length;
+
+      const deliveryPromises = messages.map(async (msg) => {
+        const outcome = await this.deliverMessage(msg);
+        if (outcome) totalSucceeded++;
+        else totalFailed++;
+      });
+
+      await Promise.allSettled(deliveryPromises);
     }
 
-    let succeeded = 0;
-    let failed = 0;
-
-    const deliveryPromises = messages.map(async (msg) => {
-      const outcome = await this.deliverMessage(msg);
-      if (outcome) succeeded++;
-      else failed++;
-    });
-
-    await Promise.allSettled(deliveryPromises);
-
-    // Check if there are more pending messages due now or in the future
+    // Schedule DO alarm for the next pending message or schedule
     await this.scheduleNextPendingAlarm();
 
-    return { processed: messages.length, succeeded, failed };
+    return { processed: totalProcessed, succeeded: totalSucceeded, failed: totalFailed };
   }
 
   /**
@@ -405,18 +569,19 @@ export class StashStorage extends DurableObject {
     // Generate Upstash-compatible HMAC-SHA256 signature
     const signingKey =
       this.envConfig.QSTASH_CURRENT_SIGNING_KEY ||
-      this.envConfig.API_KEY ||
-      'stash_secret_key';
+      (this.envConfig.API_KEY?.trim() || undefined);
 
     let upstashSignature = '';
-    try {
-      upstashSignature = await generateQStashSignature({
-        url: msg.url,
-        body: msg.payload || '',
-        signingKey,
-      });
-    } catch (sigErr) {
-      console.warn('Failed to generate Upstash-Signature:', sigErr);
+    if (signingKey) {
+      try {
+        upstashSignature = await generateQStashSignature({
+          url: msg.url,
+          body: msg.payload || '',
+          signingKey,
+        });
+      } catch (sigErr) {
+        console.warn('Failed to generate Upstash-Signature:', sigErr);
+      }
     }
 
     const headers: Record<string, string> = {
@@ -455,36 +620,17 @@ export class StashStorage extends DurableObject {
     const latencyMs = Date.now() - startTime;
 
     // Record delivery attempt into audit logs
-    try {
-      await this.ctx.storage.sql.exec(
-        `INSERT INTO delivery_logs (
-          id, message_id, group_id, url, method, status_code, success, latency_ms, retries, error, delivered_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        crypto.randomUUID(),
-        msg.id,
-        msg.group_id,
-        msg.url,
-        msg.method || 'POST',
-        responseStatus,
-        success ? 1 : 0,
-        latencyMs,
-        msg.retries,
-        errorDetail || null,
-        Date.now()
-      );
-
-      // Keep recent 300 logs per group
-      await this.ctx.storage.sql.exec(
-        `DELETE FROM delivery_logs
-         WHERE id NOT IN (
-           SELECT id FROM delivery_logs WHERE group_id = ? ORDER BY delivered_at DESC LIMIT 300
-         ) AND group_id = ?`,
-        msg.group_id,
-        msg.group_id
-      );
-    } catch (logErr) {
-      console.warn('Failed to insert delivery log:', logErr);
-    }
+    await this.insertDeliveryLog(
+      msg.id,
+      msg.group_id,
+      msg.url,
+      msg.method || 'POST',
+      responseStatus,
+      success,
+      latencyMs,
+      msg.retries,
+      errorDetail || null
+    );
 
     if (success) {
       // Succeeded: remove from queue
@@ -549,7 +695,7 @@ export class StashStorage extends DurableObject {
 
         await this.ctx.storage.sql.exec(
           `UPDATE queue
-           SET status = ?, retries = ?, visibility_at = ?, last_error = ?
+           SET status = ?, retries = ?, visibility_at = ?, last_error = ?, processing_started_at = 0
            WHERE id = ?`,
           MESSAGE_STATUS.PENDING,
           nextRetries,
@@ -629,16 +775,24 @@ export class StashStorage extends DurableObject {
     const schedRow = schedResult.toArray()[0] as any;
     const nextSchedRun = schedRow?.next_run && Number(schedRow.next_run) > now ? Number(schedRow.next_run) : null;
 
-    let earliest: number | null = null;
-    if (nextMsgRun && nextSchedRun) {
-      earliest = Math.min(nextMsgRun, nextSchedRun);
-    } else if (nextMsgRun) {
-      earliest = nextMsgRun;
-    } else if (nextSchedRun) {
-      earliest = nextSchedRun;
-    }
+    // 3. Earliest processing lease expiration
+    const leaseTimeoutMs = this.getLeaseTimeoutMs();
+    const procResult = await this.ctx.storage.sql.exec(
+      `SELECT MIN(processing_started_at) as earliest_processing
+       FROM queue
+       WHERE status = ? AND processing_started_at > 0`,
+      MESSAGE_STATUS.PROCESSING
+    );
+    const procRow = procResult.toArray()[0] as any;
+    const earliestProc = procRow?.earliest_processing && Number(procRow.earliest_processing) > 0 ? Number(procRow.earliest_processing) : null;
+    const nextProcLease = earliestProc ? earliestProc + leaseTimeoutMs : null;
 
-    if (earliest) {
+    const candidates = [nextMsgRun, nextSchedRun, nextProcLease].filter(
+      (t): t is number => typeof t === 'number' && t > now
+    );
+
+    if (candidates.length > 0) {
+      const earliest = Math.min(...candidates);
       await this.ctx.storage.setAlarm(earliest);
     }
   }
@@ -800,7 +954,7 @@ export class StashStorage extends DurableObject {
 
     await this.ctx.storage.sql.exec(`DELETE FROM queue_dlq WHERE id = ?`, id);
 
-    this.ctx.waitUntil(this.consumeQueue());
+    this.ctx.waitUntil(this.consumeQueue(undefined, row.group_id));
     return true;
   }
 

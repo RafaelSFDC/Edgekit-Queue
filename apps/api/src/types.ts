@@ -10,6 +10,7 @@ export interface Env {
   HTTP_REQUEST_TIMEOUT?: number | string;
   TOTAL_RETRIES_BEFORE_DLQ?: number | string;
   MAX_CONCURRENT_DELIVERIES?: number | string;
+  PROCESSING_LEASE_TIMEOUT?: number | string;
   ALLOWED_ORIGINS?: string;
   DLQ_ALERT_URL?: string;
 }
@@ -37,6 +38,7 @@ export interface QueueMessage {
   callback_url: string | null;
   dedup_id: string | null;
   priority: number;
+  processing_started_at?: number;
 }
 
 export interface DLQMessage {

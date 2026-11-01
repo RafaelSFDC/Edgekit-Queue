@@ -13,7 +13,7 @@ healthRoute.get('/health', (c) => {
 healthRoute.get('/api/info', (c) => {
   return c.json({
     status: 'ok',
-    service: 'Edgekit Queue (Serverless Upstash QStash & Redis clone)',
+    service: 'Edgekit Queue (Simple self-hosted HTTP queue on Cloudflare Workers)',
     version: '1.0.0',
     endpoints: {
       health: 'GET /health',
@@ -25,6 +25,9 @@ healthRoute.get('/api/info', (c) => {
       process: 'ALL /process',
       messages: 'GET /messages',
       dlq: 'GET /dlq',
+      keys: 'GET /v2/keys',
+      schedules: 'GET /api/v1/schedules',
+      settings: 'GET /api/v1/settings',
       redis_get: 'GET /get/:key',
       redis_set: 'POST /set/:key/:value',
       redis_del: 'DELETE /del/:key',

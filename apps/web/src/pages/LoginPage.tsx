@@ -143,7 +143,7 @@ export const LoginPage: React.FC = () => {
                     type={showPassword ? 'text' : 'password'}
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
-                    placeholder="stash_secret_key"
+                    placeholder={t.login.apiKeyPlaceholder || "eq_..."}
                     className="pr-9 font-mono text-xs"
                     required
                   />

@@ -18,8 +18,9 @@ export function constantTimeEquals(a: string, b: string): boolean {
   return result === 0;
 }
 
-export function getConfiguredApiKey(env: Env): string {
-  return env.API_KEY || 'stash_secret_key';
+export function getConfiguredApiKey(env: Env): string | undefined {
+  const key = env.API_KEY?.trim();
+  return key && key.length > 0 ? key : undefined;
 }
 
 /**
@@ -35,6 +36,9 @@ export function authenticateRequest(
   explicitKey?: string | null
 ): boolean {
   const configuredKey = getConfiguredApiKey(c.env);
+  if (!configuredKey) {
+    return false;
+  }
 
   const cookieKey = getCookie(c, AUTH_COOKIE_NAME);
   const headerKey = c.req.header('x-api-key') || c.req.header('upstash-token');

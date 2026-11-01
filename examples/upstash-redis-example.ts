@@ -9,7 +9,7 @@ import { Redis } from '@upstash/redis';
 // Configure to point to your self-hosted Cloudflare-Stash worker
 const redis = new Redis({
   url: process.env.STASH_URL || 'http://localhost:8787',
-  token: process.env.STASH_KEY || 'stash_secret_key',
+  token: process.env.EDGEKIT_API_KEY || process.env.STASH_KEY || 'your-api-key',
 });
 
 async function main() {

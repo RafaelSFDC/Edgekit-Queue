@@ -186,10 +186,10 @@ export const en: Translations = {
     title: 'Access Edgekit Queue',
     subtitle: 'Enter your master API key (API_KEY) to manage queues and execute commands.',
     apiKeyLabel: 'Secret API Key',
-    apiKeyPlaceholder: 'e.g. stash_secret_key...',
+    apiKeyPlaceholder: 'e.g. eq_...',
     submit: 'Connect to Dashboard',
     authenticating: 'Validating key...',
     invalidKey: 'Invalid API Key. Please verify your secret in .dev.vars or production secrets.',
-    defaultKeyHint: 'Tip: in local dev environment, default key is stash_secret_key',
+    defaultKeyHint: 'Tip: check the API_KEY defined in your .dev.vars or Cloudflare secrets',
   },
 };

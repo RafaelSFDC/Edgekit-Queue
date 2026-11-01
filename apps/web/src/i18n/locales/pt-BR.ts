@@ -186,10 +186,10 @@ export const ptBR: Translations = {
     title: 'Acessar Edgekit Queue',
     subtitle: 'Digite sua chave de API mestra (API_KEY) para gerenciar filas e executar comandos.',
     apiKeyLabel: 'Chave Secreta de API',
-    apiKeyPlaceholder: 'ex: stash_secret_key...',
+    apiKeyPlaceholder: 'ex: eq_...',
     submit: 'Conectar ao Painel',
     authenticating: 'Validando chave...',
     invalidKey: 'Chave de API inválida. Verifique sua chave no arquivo .dev.vars ou secrets.',
-    defaultKeyHint: 'Dica: em ambiente de desenvolvimento local, a chave padrão é stash_secret_key',
+    defaultKeyHint: 'Dica: verifique a API_KEY definida no seu arquivo .dev.vars ou secrets da Cloudflare',
   },
 };

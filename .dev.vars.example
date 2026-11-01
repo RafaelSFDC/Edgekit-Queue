@@ -1,7 +1,11 @@
-# Cloudflare-Stash Local Configuration
-# Copy this file to .dev.vars for local testing
+# Edgekit Queue Local Development Configuration
+# Copy this file to .dev.vars for local testing:
+# cp .dev.vars.example .dev.vars
+#
+# In production, set API_KEY securely as a Wrangler secret:
+# wrangler secret put API_KEY
 
-API_KEY=stash_secret_key
+API_KEY=your-local-dev-api-key
 HTTP_REQUEST_TIMEOUT=15
 TOTAL_RETRIES_BEFORE_DLQ=3
 MAX_CONCURRENT_DELIVERIES=10

@@ -7,90 +7,131 @@
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/RafaelSFDC/Edgekit-Queue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Zero Infra](https://img.shields.io/badge/Infra-100%25%20Serverless-pink)](#)
+[![Zero External Infra](https://img.shields.io/badge/Infra-Cloudflare%20Native-blue)](#)
 
-> **Serverless, open-source Upstash (QStash + Redis) clone running on Cloudflare Workers using Hono and SQLite Durable Objects.**  
-> HTTP asynchronous queue with flexible delay scheduling, recurring cron schedules, message priority queues, concurrency control & throttling, automatic retries with exponential backoff, DLQ with instant Discord/Slack webhook alerts, embedded Redis REST key-value store (supporting Sorted Sets / `@upstash/ratelimit`), and a modern interactive dashboard in React 19 + Tailwind CSS v4.
+> **Simple, self-hosted HTTP message queue running on your Cloudflare account using Workers and SQLite Durable Objects.**  
+> Publish background jobs via HTTP, schedule delayed webhook deliveries, handle automatic retries with exponential backoff, isolate queues with group concurrency control, inspect and replay failed jobs in the Dead Letter Queue (DLQ), and verify authenticity with HMAC-SHA256 signatures — with zero required external services and a lightweight single API key.
 
 ---
 
 ## 📑 Table of Contents
 
-- [Why Edgekit Queue?](#-why-edgekit-queue)
-- [Highlights](#-highlights)
+- [Core Capabilities](#-core-capabilities)
+- [Secondary & Experimental Features](#-secondary--experimental-features)
 - [Architecture & Message Lifecycle](#-architecture--message-lifecycle)
-- [Prerequisites](#-prerequisites)
+- [Delivery Guarantees & Idempotency](#-delivery-guarantees--idempotency)
+- [Prerequisites & Cloudflare Limits](#-prerequisites--cloudflare-limits)
+- [Configuration & Secrets](#-configuration--secrets)
 - [Quick Start & Local Development](#-quick-start--local-development)
 - [REST API Reference](#-rest-api-reference)
-  - [1. Message Queue & Priority](#1-message-queue--priority)
-  - [2. Recurring Cron Schedules](#2-recurring-cron-schedules)
-  - [3. Dead Letter Queue (DLQ) & Discord/Slack Alerts](#3-dead-letter-queue-dlq--discordslack-alerts)
-  - [4. Concurrency Control & Settings](#4-concurrency-control--settings)
-  - [5. Audit & Delivery Logs](#5-audit--delivery-logs)
-  - [6. Embedded Redis REST Store](#6-embedded-redis-rest-store)
-- [Zero-Dependency shadcn-style Snippet](#-zero-dependency-shadcn-style-snippet)
+  - [1. Publish & Message Queue](#1-publish--message-queue)
+  - [2. Dead Letter Queue (DLQ) & Reprocessing](#2-dead-letter-queue-dlq--reprocessing)
+  - [3. Concurrency Control & Group Settings](#3-concurrency-control--group-settings)
+  - [4. Audit & Delivery Logs](#4-audit--delivery-logs)
+  - [5. Webhook Signature Verification](#5-webhook-signature-verification)
+  - [6. Secondary: Recurring Cron Schedules](#6-secondary-recurring-cron-schedules)
+  - [7. Secondary: Embedded Redis REST Key-Value Store](#7-secondary-embedded-redis-rest-key-value-store)
+- [Zero-Dependency Client Snippets](#-zero-dependency-client-snippets)
 - [Deploying to Cloudflare](#-deploying-to-cloudflare)
 - [License](#-license)
 
 ---
 
-## 💡 Why Edgekit Queue?
+## 🚀 Core Capabilities
 
-Interacting with native Cloudflare Queues strictly through the Cloudflare Dashboard presents key operational challenges:
-1. **Zero Payload Visibility:** The native dashboard does not let you inspect message contents or peek at queued JSON payloads.
-2. **DLQ without Visibility or 1-Click Replay:** Failed messages increment a graph counter, but you cannot inspect the error or replay them from the UI.
-3. **Restricted to Workers:** External web applications (Vercel, Next.js, VPS, Laravel, Python) cannot consume Cloudflare Queues directly without writing intermediary Workers.
+Edgekit Queue focuses on delivering a reliable, secure, self-hosted queue:
 
-**Edgekit Queue** bridges this gap by implementing the **QStash protocol (HTTP background webhooks)** backed by SQLite in **Cloudflare Durable Objects**. Any web application can schedule jobs via standard HTTP requests, monitor deliveries with millisecond latency metrics, and replay DLQ failures visually.
+- ⚡ **Cloudflare Native**: Self-hosted entirely on your Cloudflare account with no external queue brokers or databases.
+- 📬 **HTTP Job Publishing**: Publish messages via standard HTTP `POST /publish` or Upstash-compatible `POST /v2/publish/:url`.
+- ⏱️ **Flexible Delay Scheduling**: Schedule delivery delays formatted as `"10s"`, `"30s"`, `"5m"`, `"2h"`, `"1d"`, or UNIX epoch timestamps.
+- 🔄 **Exponential Backoff Retries**: Failed webhook calls (non-2xx HTTP status codes or timeouts) automatically retry with exponential backoff.
+- 🚦 **Per-Group Concurrency Control**: Set maximum concurrent active deliveries per queue group (atomically enforced in SQLite to avoid overwhelming target endpoints).
+- 🛡️ **Processing Lease & Crash Recovery**: Messages in `processing` carry an automatic lease timeout. If a Worker is interrupted or terminated mid-flight, the message is rescued and retried rather than getting stuck forever.
+- 📦 **Dead Letter Queue (DLQ)**: Permanently failed jobs are stored with their exact failure reason, payload, and retry history for 1-click visual replay.
+- 🔐 **Cryptographic Signatures (`Upstash-Signature`)**: Webhook requests are signed with HMAC-SHA256 (JWT-formatted) so your receiving endpoints can verify that the call originated from your queue.
+- 🛡️ **TTL Deduplication**: Optional `dedupId` prevents accidental duplicate deliveries within a configurable time window.
+- 🔑 **Simple, Secure API Key Auth**: Authenticate with a single secret API key (`X-API-Key` or `Authorization: Bearer`). Deployments fail closed if no key is configured.
+- 🖥️ **Interactive Web Dashboard**: React 19 + Tailwind CSS v4 dashboard for real-time queue inspection, DLQ replay, delivery audit logs, and settings.
+- 📦 **Zero-Dependency Drop-In Snippets**: Copy [`snippets/queue.ts`](snippets/queue.ts) or [`snippets/queue.py`](snippets/queue.py) directly into your app.
 
 ---
 
-## 🚀 Highlights
+## 🧪 Secondary & Experimental Features
 
-- ⚡ **100% Serverless**: Runs completely on Cloudflare's edge network with zero dedicated virtual machines.
-- ⏱️ **Flexible Delay Scheduling**: Delays formatted as `"10s"`, `"30s"`, `"5m"`, `"2h"`, `"1d"`, or UNIX epoch timestamps.
-- ⏰ **Recurring Cron Schedules**: Schedule recurring jobs with 5-part cron syntax (e.g. `*/5 * * * *`, `0 9 * * 1-5`, `@daily`).
-- 🎯 **Message Priority (Priority Queues)**: Higher priority messages (e.g. `priority: 10`) jump ahead of lower priority tasks.
-- 🚦 **Concurrency Control & Throttling**: Configure maximum concurrent active deliveries to avoid overwhelming destination servers.
-- 🔄 **Exponential Backoff Retries**: Automatically retries failed endpoints (4xx/5xx or timeouts) with intelligent backoff intervals.
-- 📬 **Dead Letter Queue (DLQ)**: Captures permanently failed messages for debugging and 1-click reprocessing.
-- 🔔 **Instant DLQ Alerts**: Automatic webhook alerts (compatible with Discord, Slack, and custom webhooks) upon final failure.
-- 🔐 **Cryptographic Signatures (`Upstash-Signature`)**: Signs outgoing webhooks with HMAC-SHA256 (JWT) for secure receiver validation.
-- 🛡️ **TTL Deduplication**: Prevents duplicate executions using custom keys (`dedupId`).
-- ⚡ **Redis REST Store with ZSET**: Supports Strings, Hashes, Lists, and Sorted Sets — **enables `@upstash/ratelimit` at the edge**.
-- 🖥️ **Integrated Web Dashboard**: Modern UI in **React 19 + Tailwind CSS v4** with live stats, cron schedules manager, settings, message inspector, and i18n.
-- 📦 **Zero-Dependency Drop-In Snippets**: Copy [`snippets/queue.ts`](snippets/queue.ts) or [`snippets/queue.py`](snippets/queue.py) directly into your app.
+The following capabilities are provided as secondary or lightweight features:
+
+- ⏰ **Recurring Cron Schedules**: Basic scheduled webhook triggers running via Cloudflare Workers Cron Trigger (1-minute resolution). Useful for periodic webhooks, but not a full replacement for external distributed schedulers.
+- ⚡ **Basic Redis REST Store**: Lightweight in-memory/SQLite KV emulator supporting basic string, hash, list, and sorted set commands for edge utility scripts. It is **not** a complete Redis implementation and is not guaranteed for complex external third-party rate limiters.
 
 ---
 
 ## 📐 Architecture & Message Lifecycle
 
 ```
-[Your App / Vercel / Next.js / VPS]
+[Your App / Next.js / Laravel / Python]
         │
-        ▼ (POST /publish with X-API-Key, Upstash-Delay, Upstash-Priority)
+        ▼ (POST /publish with X-API-Key, Upstash-Delay, Upstash-Group-Id)
 [Edgekit Queue Worker (Hono)]
         │
-        ▼ (Persists into SQLite and schedules alarm)
+        ▼ (Persists into SQLite and arms Durable Object alarm)
 [Durable Object: StashStorage]
         │
-        ▼ (Alarm triggers after specified delay or on Cron schedule)
+        ▼ (Alarm triggers after delay or immediate dispatch within concurrency limit)
 [Dispatches HTTP Webhook Signed with HMAC-SHA256]
         │
-        ├─► [HTTP 200 OK]  ──► Success! Deleted from queue & audit logged.
-        └─► [HTTP 5xx/Err] ──► Exponential retry ──► DLQ (if retries exhausted)
-                                                      │
-                                                      ▼
-                                           [Dispatches Discord/Slack Alert]
+        ├─► [HTTP 2xx OK]  ──► Success! Deleted from queue & recorded in audit logs.
+        └─► [HTTP 5xx/Err] ──► Exponential backoff retry ──► DLQ (when retries exhausted)
+                                                               │
+                                                               ▼
+                                                    [Optional Webhook Alert]
 ```
 
 ---
 
-## 🛠️ Prerequisites
+## ⚠️ Delivery Guarantees & Idempotency
+
+> [!IMPORTANT]
+> **At-Least-Once Delivery Semantics:**
+> Edgekit Queue provides **at-least-once** delivery guarantees. Under conditions such as network dropouts, temporary timeouts where the destination received the request but didn't respond in time, or worker lease recoveries after an edge interruption, a webhook may be delivered more than once.
+> 
+> **Your webhook endpoints should be idempotent:**
+> - Check the `Upstash-Message-Id` header to deduplicate already-processed jobs.
+> - Use unique business transaction keys (e.g. `order_id`, `invoice_id`).
+
+---
+
+## 🛠️ Prerequisites & Cloudflare Limits
 
 - **Node.js** >= 18
 - **pnpm** (or npm)
-- A **Cloudflare** account with the **Workers Paid** plan (\$5/mo), which is required for **Durable Objects with SQLite persistence**.
+- **Cloudflare Account**:
+  - Requires the **Cloudflare Workers Paid** plan ($5/mo) to enable **Durable Objects with SQLite persistence**. Availability, storage quotas, and request limits are subject to Cloudflare's current pricing and terms.
+- **Payload Limits**:
+  - Payloads are subject to Cloudflare Workers request body size limits (~100MB on Paid workers) and SQLite individual row size limits.
+- **Timeout Limits**:
+  - Outbound webhook requests default to a 15-second timeout (configurable via `HTTP_REQUEST_TIMEOUT`).
+
+---
+
+## 🔐 Configuration & Secrets
+
+Edgekit Queue relies on a single master API key and optional environment variables:
+
+| Variable | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `API_KEY` | Secret | **Yes** | Master API key used to authenticate API requests and dashboard access. Set via `wrangler secret put API_KEY` in production, or in `.dev.vars` locally. |
+| `QSTASH_CURRENT_SIGNING_KEY` | Secret | No | Dedicated HMAC signing key for `Upstash-Signature`. Defaults to `API_KEY` if omitted. |
+| `QSTASH_NEXT_SIGNING_KEY` | Secret | No | Next signing key used for zero-downtime key rotation. |
+| `HTTP_REQUEST_TIMEOUT` | Var | No | Timeout for outbound webhook requests in seconds (default: `15`). |
+| `TOTAL_RETRIES_BEFORE_DLQ` | Var | No | Default retry attempts before moving failed message to DLQ (default: `3`). |
+| `MAX_CONCURRENT_DELIVERIES` | Var | No | Default maximum concurrent outbound deliveries per queue group (default: `10`). |
+| `PROCESSING_LEASE_TIMEOUT` | Var | No | Lease duration in seconds before an in-flight message is considered abandoned and recovered (default: `30` or `2 * HTTP_REQUEST_TIMEOUT`). |
+| `ALLOWED_ORIGINS` | Var | No | Comma-separated list of allowed CORS origins for authenticated cross-origin requests (e.g. `https://my-app.com,https://admin.pages.dev`). |
+| `DLQ_ALERT_URL` | Var/Setting | No | Webhook URL (Discord, Slack, or custom API) notified when a message exhausts retries. |
+
+> [!CAUTION]
+> **Fail-Closed Security:**
+> If `API_KEY` is not configured, the Worker refuses all API operations with a 500 configuration error, `/health` reports 503 unhealthy, and no secrets or signing keys are ever disclosed.
 
 ---
 
@@ -107,23 +148,24 @@ Interacting with native Cloudflare Queues strictly through the Cloudflare Dashbo
    pnpm install
    ```
 
-3. **Generate your local development secrets:**
+3. **Configure your development secrets:**
    ```bash
    pnpm setup
    ```
-   *This automatically creates `.dev.vars` with a cryptographically secure key.*
+   *This creates `.dev.vars` with a secure random key. Alternatively, copy `.dev.vars.example` to `.dev.vars` and set your preferred `API_KEY`.*
 
-4. **Start local dev servers:**
+4. **Start local development servers:**
    ```bash
    pnpm dev
    ```
-   * Worker runs at `http://localhost:8787`.
-   * Vite SPA dashboard runs at `http://localhost:5173`.
+   - Worker API runs at: `http://localhost:8787`
+   - Interactive Web Dashboard runs at: `http://localhost:5173`
 
-5. **Run tests:**
+5. **Run test suites:**
    ```bash
    pnpm test
    ```
+   *Runs unit tests, security checks, concurrency/recovery tests, and real Wrangler integration tests.*
 
 ---
 
@@ -133,157 +175,152 @@ Interacting with native Cloudflare Queues strictly through the Cloudflare Dashbo
 Authenticate requests using any of the following:
 * Header: `X-API-Key: your_key`
 * Header: `Authorization: Bearer your_key`
-* Header QStash: `Upstash-Token: your_key`
+* Header (QStash SDK): `Upstash-Token: your_key`
 
 ---
 
-### 1. Message Queue & Priority
+### 1. Publish & Message Queue
 
 #### `POST /publish`
 Publishes a message to be asynchronously dispatched to a destination URL.
 
-**Supported Headers:**
-* `Upstash-Delay`: e.g. `"10s"`, `"5m"`, `"2h"`, or UNIX epoch ms.
-* `Upstash-Retries`: Maximum retry count (default: 3).
-* `Upstash-Priority`: Priority number (`0` to `100`; higher numbers processed first).
-* `Upstash-Group-Id`: Isolated queue / group identifier (default: `"default"`).
-* `Upstash-Callback`: Callback URL invoked after delivery success or final failure.
-* `Upstash-Dedup-Id`: Deduplication key (discards duplicate messages during TTL window).
-* `Upstash-Method`: HTTP method sent to destination (default: `"POST"`).
-* `Upstash-Forward-<Header>`: Forwards custom headers to the destination webhook.
+**Query Parameters or JSON Body:**
+* `url` (required): Destination webhook URL.
+* `payload`: JSON payload or raw text sent in the request body.
+* `groupId`: Queue group identifier (default: `"default"`).
+* `delay`: Delay duration (`"10s"`, `"5m"`, `"2h"`, `"1d"`, or ms).
+* `retries`: Maximum retry attempts (default: `3`).
+* `priority`: Priority score (`0` to `100`; higher scores dispatched first).
+* `dedupId`: Deduplication key.
+* `dedupWindow`: Deduplication TTL window in seconds (default: 7200).
+* `callbackUrl`: URL called when message succeeds or permanently fails.
+
+**Forward Headers:**
+Headers prefixed with `Upstash-Forward-` are forwarded directly to the destination webhook (e.g. `Upstash-Forward-Authorization: Bearer token` forwards `Authorization: Bearer token`).
 
 ```bash
 curl -X POST "http://localhost:8787/publish" \
   -H "X-API-Key: your_key" \
   -H "Content-Type: application/json" \
-  -H "Upstash-Delay: 1m" \
-  -H "Upstash-Retries: 3" \
-  -H "Upstash-Priority: 10" \
+  -H "Upstash-Delay: 30s" \
   -d '{
     "url": "https://my-app.com/api/webhooks/process",
     "payload": { "orderId": "ord_123", "status": "paid" },
+    "groupId": "orders",
     "priority": 10
   }'
 ```
 
 #### `GET /messages`
-List currently scheduled or active messages in the queue.
-* **Query Params:** `groupId` (optional), `limit` (default: 50), `offset` (default: 0).
+Lists pending and delayed messages in the queue.
+* **Query Params:** `groupId` (optional, default: `"default"`), `limit` (default: 50), `offset` (default: 0).
 
 #### `DELETE /messages/:id`
 Cancels and removes a pending message from the queue.
 
----
-
-### 2. Recurring Cron Schedules
-
-#### `POST /api/v1/schedules`
-Creates a recurring cron job:
-```bash
-curl -X POST "http://localhost:8787/api/v1/schedules" \
-  -H "X-API-Key: your_key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "cron": "*/5 * * * *",
-    "url": "https://my-app.com/api/webhooks/cron",
-    "payload": { "task": "sync_inventory" },
-    "priority": 5
-  }'
-```
-
-#### Schedule Management Endpoints:
-* `GET /api/v1/schedules` — List schedules for a group.
-* `POST /api/v1/schedules/:id/pause` — Pause a schedule.
-* `POST /api/v1/schedules/:id/resume` — Resume a schedule.
-* `POST /api/v1/schedules/:id/trigger` — Trigger a manual run now.
-* `DELETE /api/v1/schedules/:id` — Delete a schedule.
+#### `ALL /process`
+Manually triggers processing of pending messages for a queue group (useful for testing or external cron sweeps).
+* **Query Params:** `groupId` (default: `"default"`), `limit` (default: 10).
 
 ---
 
-### 3. Dead Letter Queue (DLQ) & Discord/Slack Alerts
+### 2. Dead Letter Queue (DLQ) & Reprocessing
 
 #### `GET /dlq`
-Lists messages that exhausted all delivery retry attempts.
+Lists messages that exhausted all retry attempts.
+* **Query Params:** `groupId` (default: `"default"`), `limit` (default: 50), `offset` (default: 0).
 
 #### `POST /dlq/:id/retry`
-Immediately moves a DLQ message back into the active queue for a fresh attempt.
+Re-queues a failed DLQ message back into active processing with a reset retry counter.
 
 #### `DELETE /dlq/:id`
-Permanently discards a message from the DLQ.
+Permanently deletes a message from the DLQ.
 
 ---
 
-### 4. Concurrency Control & Settings
+### 3. Concurrency Control & Group Settings
+
+Concurrency limits are isolated per queue group and enforced atomically in SQLite:
 
 #### `GET /api/v1/settings`
-Returns current concurrency limit and DLQ alert webhook URL.
+Returns settings for a queue group (`max_concurrent_deliveries`, `dlq_alert_url`).
 
 #### `POST /api/v1/settings`
-Updates concurrency and webhook settings:
+Updates group settings:
 ```bash
 curl -X POST "http://localhost:8787/api/v1/settings" \
   -H "X-API-Key: your_key" \
   -H "Content-Type: application/json" \
   -d '{
-    "maxConcurrentDeliveries": 10,
+    "groupId": "orders",
+    "maxConcurrentDeliveries": 5,
     "dlqAlertUrl": "https://discord.com/api/webhooks/YOUR_WEBHOOK"
   }'
 ```
 
-#### `POST /api/v1/settings/test-alert`
-Sends a test ping to the configured alert webhook.
-
 ---
 
-### 5. Audit & Delivery Logs
+### 4. Audit & Delivery Logs
 
 #### `GET /logs`
-Returns recent delivery attempts with millisecond latency, HTTP status codes, and error details.
+Returns the recent 300 delivery attempts per group with millisecond latency, HTTP status codes, and error details.
 
 #### `POST /logs/clear`
-Clears delivery logs for the specified queue group.
+Clears delivery logs for a specified group.
 
 ---
 
-### 6. Embedded Redis REST Store
+### 5. Webhook Signature Verification
 
-Edgekit Queue emulates the Upstash Redis REST interface:
+Webhooks sent by Edgekit Queue contain the `Upstash-Signature` header (a 3-part JWT). Receivers can verify the HMAC-SHA256 signature against `API_KEY` (or `QSTASH_CURRENT_SIGNING_KEY`):
 
-#### Execute Raw Command: `POST /`
-```bash
-curl -X POST "http://localhost:8787/" \
-  -H "X-API-Key: your_key" \
-  -H "Content-Type: application/json" \
-  -d '["SET", "user:1", "{\"name\":\"John\"}", "EX", 3600]'
-```
+```ts
+import { verifyWebhookSignature } from './lib/queue';
 
-#### REST Helpers:
-* `GET /get/:key` — Retrieves key value.
-* `POST /set/:key` — Sets key value (supports `?ex=seconds`).
-* `DELETE /del/:key` — Deletes a key.
+const isValid = await verifyWebhookSignature({
+  signature: req.headers.get('upstash-signature') || '',
+  url: 'https://my-app.com/api/webhooks/process',
+  body: rawRequestBodyString,
+  signingKey: process.env.EDGEKIT_SIGNING_KEY!,
+});
 
-#### Transactional Pipeline: `POST /pipeline`
-```bash
-curl -X POST "http://localhost:8787/pipeline" \
-  -H "X-API-Key: your_key" \
-  -H "Content-Type: application/json" \
-  -d '[
-    ["SET", "k1", "v1"],
-    ["GET", "k1"],
-    ["INCR", "counter"]
-  ]'
+if (!isValid) {
+  return new Response('Invalid signature', { status: 401 });
+}
 ```
 
 ---
 
-## 📦 Zero-Dependency shadcn-style Snippet
+### 6. Secondary: Recurring Cron Schedules
 
-No heavy npm packages required. Copy the drop-in client directly into your project:
+Cron jobs trigger webhooks on a 1-minute resolution via Cloudflare Workers Cron Trigger:
+
+* `POST /api/v1/schedules` — Create a recurring cron job (`cron`, `url`, `payload`, `groupId`).
+* `GET /api/v1/schedules` — List schedules.
+* `POST /api/v1/schedules/:id/pause` — Pause schedule.
+* `POST /api/v1/schedules/:id/resume` — Resume schedule.
+* `POST /api/v1/schedules/:id/trigger` — Trigger schedule immediately.
+* `DELETE /api/v1/schedules/:id` — Delete schedule.
+
+---
+
+### 7. Secondary: Embedded Redis REST Key-Value Store
+
+Basic key-value and data structure storage for edge scripts:
+
+* `GET /get/:key` — Retrieve key.
+* `POST /set/:key/:value` — Set key with optional `?ex=seconds`.
+* `DELETE /del/:key` — Delete key.
+* `POST /pipeline` — Execute an array of basic Redis commands.
+
+---
+
+## 📦 Zero-Dependency Client Snippets
+
+No heavy SDK or npm packages required. Copy the drop-in client directly into your project:
 
 * **TypeScript / Next.js / Node:** Copy [`snippets/queue.ts`](snippets/queue.ts) into `lib/queue.ts`.
 * **Python:** Copy [`snippets/queue.py`](snippets/queue.py) into `lib/queue.py`.
-
-See the [Comprehensive Integration Guide](docs/integrations.md) for full examples with Next.js App Router and webhook signature verification.
 
 ---
 
@@ -294,17 +331,23 @@ See the [Comprehensive Integration Guide](docs/integrations.md) for full example
    pnpm --filter @edgekit/api wrangler login
    ```
 
-2. **Set your production API secret:**
+2. **Configure your production API secret:**
    ```bash
    pnpm --filter @edgekit/api wrangler secret put API_KEY
    ```
 
-3. **Build the dashboard and deploy with 1 command:**
+3. **Verify the build and bindings:**
+   ```bash
+   pnpm build
+   pnpm --filter @edgekit/api wrangler deploy --dry-run
+   ```
+
+4. **Deploy:**
    ```bash
    pnpm deploy
    ```
 
-Your serverless queue and dashboard will be live on the edge in seconds! 🚀
+Your queue and dashboard will be live on your Cloudflare account! 🚀
 
 ---
 
